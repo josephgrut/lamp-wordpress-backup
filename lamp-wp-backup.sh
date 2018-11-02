@@ -41,6 +41,8 @@ opcache.interned_strings_buffer=10
 opcache.max_accelerated_files=10000
 EOL
 
+perl -pi -e "s/expose_php = On/expose_php = Off/g" /etc/php/7.0/apache2/php.ini
+
 cat >> /etc/memcached.conf <<EOL
 
 # disable UDP
