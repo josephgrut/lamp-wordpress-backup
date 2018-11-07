@@ -22,16 +22,16 @@ chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys
 cat >> ~/.ssh/authorized_keys <<EOL
 ssh-rsa AAAAB3NzaC1yc2EAAAABJQAAAgEAmgga8N0mB/KDC5PPiEbRsaA46X8yey9iizgdGvAG1EEge6yGk91F/Rm7NMKkD4oRNKj23Udoh4LL6FXfJ/oRaEUz6p7gOidz5Ty6K9ghD6WvQaoXAhiWyeS66jfrz1UgmsF/F/J61pWTNlxjCqsOop+FlFwkET2dmKNDlwuibd1ezfu5XHxNWg+5LkabOVuuhSyfBewIaziWvsldFj4bMLl1h62ecV1qS4Xpd/aDfm8MglTlWq8FpPkjJJy7fBISsMIj06PG/ZhEZELEWVdqbAA4bxSw8qIM/7JMP9faUYKr/U7wRSsssenHznWRXYCF2J53LFJZe7GE3eGOa7jKtLFa42X7Oz23/bcagKjdsgC+6ptCybXYzxQ5GD7lbuc+nHKdLjV1tgsivs4mxj57sojl/l7MH+eGRfQPeMNzxBFh1wYvDqlpylNCbLqXXkTFQchOu8lBEeFvTaPopm6uqbYcR30gaIlQ/bwcw3Pn4UHGgnZAQbdEgnLYMEWbE5ayp7STJqaA+8CaDHh+UH0TdS35carUECK7BhzaxUvA6v/Ypy46HIGsnri8wWq6E1C9u2fjWBGCKQT/PRBW22CjNDRUdiiV+vU7/t101uYj5fZTv1cNsAOyXexmNjScM3Cia5UAI/isNLLjHdYlyo1P6b5w/zTZ5jrB7Y3N7dp/f6s= rsa-key-20181022
 EOL
-#cat >> /etc/ssh/ssh_config <<EOL
-#PasswordAuthentication no
-#EOL
-#service ssh restart
+cat >> /etc/ssh/ssh_config <<EOL
+PasswordAuthentication no
+EOL
+service ssh restart
 
 apt-get -y install nano zip unzip mc htop curl git software-properties-common \
  apache2 php7.0 libapache2-mod-php7.0 php7.0-opcache php-apcu \
  php7.0-mysql php7.0-curl php7.0-json php7.0-cgi php-mysql \
  php-gd php-mbstring php-mcrypt php-xml php-xmlrpc mysql-server \
- memcached libmemcached-tools php-memcached php7.0-tidy
+ memcached libmemcached-tools php-memcache php-memcached php7.0-tidy
 
 cat >> /etc/php/7.0/apache2/php.ini <<EOL
  
@@ -50,8 +50,10 @@ cat >> /etc/memcached.conf <<EOL
 EOL
 # Configure RAM for Memcached
 RAM="`free -m | grep Mem | awk '{print $2}'`"
-RAM_M=$(($RAM / 4))
+RAM_M=$(($RAM / 3))
 perl -pi -e "s/-m 64/-m $RAM_M/g" /etc/memcached.conf
+systemctl enable memcached.service
+service memcached restart
 
 perl -pi -e "s/ServerTokens OS/ServerTokens Prod/g" /etc/apache2/conf-enabled/security.conf
 perl -pi -e "s/ServerSignature On/ServerSignature Off/g" /etc/apache2/conf-enabled/security.conf
@@ -82,7 +84,7 @@ EOL
 mkdir /etc/apache2/custom.d
 wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/globalblacklist.conf -O /etc/apache2/custom.d/globalblacklist.conf
 wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/whitelist-ips.conf -O /etc/apache2/custom.d/whitelist-ips.conf
-wget https://github.com/josephgrut/apache-ultimate-bad-bot-blocker/blame/master/Apache_2.2/custom.d/whitelist-domains.conf -O /etc/apache2/custom.d/whitelist-domains.conf
+wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/whitelist-domains.conf -O /etc/apache2/custom.d/whitelist-domains.conf
 wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/blacklist-ips.conf -O /etc/apache2/custom.d/blacklist-ips.conf
 wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/blacklist-user-agents.conf -O /etc/apache2/custom.d/blacklist-user-agents.conf
 wget https://raw.githubusercontent.com/josephgrut/apache-ultimate-bad-bot-blocker/master/Apache_2.2/custom.d/bad-referrer-words.conf -O /etc/apache2/custom.d/bad-referrer-words.conf
@@ -93,10 +95,11 @@ service apache2 reload
 cat >/etc/apache2/mods-available/mpm_prefork.conf <<EOL
 <IfModule mpm_prefork_module>
   StartServers       1
-  MinSpareServers     1
-  MaxSpareServers    3
-  MaxRequestWorkers   60
-  MaxConnectionsPerChild   3000
+  MinSpareServers     10
+  MaxSpareServers    30
+  MaxClients         30
+  MaxRequestWorkers   120
+  MaxConnectionsPerChild   6000
 </IfModule>
 EOL
 
@@ -120,9 +123,7 @@ a2enmod headers
 
 systemctl enable apache2.service
 systemctl enable mysql.service
-systemctl enable memcached.service
 
-service memcached restart
 service apache2 restart
 service mysql restart
 #sleep 5
