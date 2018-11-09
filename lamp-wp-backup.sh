@@ -28,7 +28,7 @@ EOL
 service ssh restart
 
 apt-get -y install nano zip unzip mc htop curl git software-properties-common \
- apache2 php7.0 libapache2-mod-php7.0 php7.0-opcache php-apcu \
+ apache2 apache2-utils php7.0 libapache2-mod-php7.0 php7.0-opcache php-apcu \
  php7.0-mysql php7.0-curl php7.0-json php7.0-cgi php-mysql \
  php-gd php-mbstring php-mcrypt php-xml php-xmlrpc mysql-server \
  memcached libmemcached-tools php-memcache php-memcached php7.0-tidy
@@ -114,12 +114,12 @@ cat > /etc/apache2/mods-available/mpm_worker.conf <<EOL
   MaxConnectionsPerChild   200
 </IfModule>
 EOL
-a2dismod status
 a2enmod rewrite
 a2enmod ssl
 a2enmod php7.0
 a2enmod expires
 a2enmod headers
+a2dismod status
 
 systemctl enable apache2.service
 systemctl enable mysql.service
@@ -229,7 +229,18 @@ echo "============================================"
 echo "Configuring .htaccess"
 echo "============================================"
 
+htpasswd -b -c /etc/apache2/.htpasswd a b
+
 cat >/var/www/$username/$websitename/www/.htaccess <<EOL
+AuthType Basic
+AuthName "Restricted Content"
+AuthUserFile /etc/apache2/.htpasswd
+Require valid-user
+
+php_value upload_max_filesize 128M
+php_value max_execution_time 120
+php_value max_input_vars 2000
+
 <IfModule mod_rewrite.c>
 RewriteEngine On
 RewriteBase /
@@ -244,31 +255,63 @@ RewriteRule ^(.*)$ index.php [F,L]
 RewriteCond %{QUERY_STRING} base64_encode[^(]*\([^)]*\) [OR]
 RewriteCond %{QUERY_STRING} (<|%3C)([^s]*s)+cript.*(>|%3E) [NC,OR]
 </IfModule>
+
 <Files .htaccess>
 Order Allow,Deny
 Deny from all
 </Files>
+
 <Files wp-config.php>
 Order Allow,Deny
 Deny from all
 </Files>
+
 <Files wp-config-sample.php>
 Order Allow,Deny
 Deny from all
 </Files>
+
 <Files readme.html>
 Order Allow,Deny
 Deny from all
 </Files>
+
 <Files xmlrpc.php>
 Order allow,deny
 Deny from all
 </files>
+
 # Gzip
 <ifModule mod_deflate.c>
 AddOutputFilterByType DEFLATE text/text text/html text/plain text/xml text/css application/x-javascript application/javascript text/javascript
 </ifModule>
+
 Options +FollowSymLinks -Indexes
+
+<IfModule mod_expires.c>
+  ExpiresActive On
+
+  # Images
+  ExpiresByType image/jpeg "access plus 1 year"
+  ExpiresByType image/gif "access plus 1 year"
+  ExpiresByType image/png "access plus 1 year"
+  ExpiresByType image/webp "access plus 1 year"
+  ExpiresByType image/svg+xml "access plus 1 year"
+  ExpiresByType image/x-icon "access plus 1 year"
+
+  # Video
+  ExpiresByType video/mp4 "access plus 1 year"
+  ExpiresByType video/mpeg "access plus 1 year"
+
+  # CSS, JavaScript
+  ExpiresByType text/css "access plus 1 month"
+  ExpiresByType text/javascript "access plus 1 month"
+  ExpiresByType application/javascript "access plus 1 month"
+
+  # Others
+  ExpiresByType application/pdf "access plus 1 month"
+  ExpiresByType application/x-shockwave-flash "access plus 1 month"
+</IfModule>
 EOL
 
 chmod 644 /var/www/$username/$websitename/www/.htaccess
