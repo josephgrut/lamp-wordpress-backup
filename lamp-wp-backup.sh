@@ -14,7 +14,7 @@ echo " ";
 echo "============================================"
 echo "Install LAMP"
 echo "============================================"
-apt-get update && apt-get upgrade -y
+#apt-get update && apt-get upgrade -y
 
 # Installing SSH Public Key
 mkdir ~/.ssh && touch ~/.ssh/authorized_keys
@@ -27,13 +27,22 @@ PasswordAuthentication no
 EOL
 service ssh restart
 
-apt-get -y install nano zip unzip mc htop curl git software-properties-common \
- apache2 apache2-utils php7.0 libapache2-mod-php7.0 php7.0-opcache php-apcu \
- php7.0-mysql php7.0-curl php7.0-json php7.0-cgi php-mysql \
- php-gd php-mbstring php-mcrypt php-xml php-xmlrpc mysql-server \
- memcached libmemcached-tools php-memcache php-memcached php7.0-tidy
+locale-gen en_US.UTF-8
+export LANG=en_US.UTF-8
 
-cat >> /etc/php/7.0/apache2/php.ini <<EOL
+apt-get -y install nano zip unzip mc htop atop iotop curl git software-properties-common screenfetch
+
+add-apt-repository ppa:ondrej/php -y
+apt-key update
+apt-get update
+
+apt-get -y install apache2 apache2-utils php7.2 libapache2-mod-php7.2 php7.2-opcache php-apcu \
+ php7.2-mysql php7.2-curl php7.2-json php7.2-cgi php7.2-mysql php7.2-gd php7.2-mbstring \
+ php-mcrypt php7.2-xml php7.2-xmlrpc mysql-server memcached libmemcached-tools \
+ php-memcache php-memcached php7.2-tidy
+
+
+cat >> /etc/php/7.2/apache2/php.ini <<EOL
  
 opcache.enable=1
 opcache.memory_consumption=256
@@ -41,7 +50,7 @@ opcache.interned_strings_buffer=10
 opcache.max_accelerated_files=10000
 EOL
 
-perl -pi -e "s/expose_php = On/expose_php = Off/g" /etc/php/7.0/apache2/php.ini
+perl -pi -e "s/expose_php = On/expose_php = Off/g" /etc/php/7.2/apache2/php.ini
 
 cat >> /etc/memcached.conf <<EOL
 
@@ -116,7 +125,7 @@ cat > /etc/apache2/mods-available/mpm_worker.conf <<EOL
 EOL
 a2enmod rewrite
 a2enmod ssl
-a2enmod php7.0
+a2enmod php7.2
 a2enmod expires
 a2enmod headers
 a2dismod status
@@ -391,22 +400,25 @@ db_user=\$(grep DB_USER "\${wp_config}" | cut -f4 -d"'")
 db_pass=\$(grep DB_PASSWORD "\${wp_config}" | cut -f4 -d"'")
 table_prefix=\$(grep table_prefix "\${wp_config}" | cut -f2 -d"'")
 
-mkdir /var/www/\$username/\$websitename/backups && cd /var/www/\$username/\$websitename/backups
-mysqldump -u \$db_user -p\$db_pass \$db_name | gzip > \$backupdate-\$websitename-DB.sql.gz
-zip -rq \$backupdate-\$websitename-FILES.zip /var/www/\$username/\$websitename/www/*
+mkdir /var/www/\$username/\$websitename/backup
+cd /var/www/\$username/\$websitename/www
+mysqldump -u \$db_user -p\$db_pass \$db_name | gzip > /var/www/\$username/\$websitename/backup/\$backupdate-\$websitename-DB.sql.gz
+zip -rq /var/www/\$username/\$websitename/backup/\$backupdate-\$websitename-FILES.zip ./*
 
 # Compresses the MySQL Dump and the Home Directory
+cd /var/www/\$username/\$websitename/backup
 tar zcPf \$websitename-\$backupdate.tar.gz *
 chmod 600 \$websitename-\$backupdate.tar.gz
+cp \$websitename-\$backupdate.tar.gz /var/www/\$username/\$websitename/backup/\$websitename-\$backupdate.tar.gz
 
 #Removes the SQL dump and Home DIR to conserve space
 rm -rf \$backupdate-\$websitename-FILES.zip \$backupdate-\$websitename-DB.sql.gz
 
 #Deletes any Backup older than X days
-find /var/www/\$username/\$websitename/backups -type f -atime +\$keepdays -exec rm {} \;
+#find /var/www/\$username/\$websitename/backups -type f -atime +\$keepdays -exec rm {} \;
 EOL
-cp /var/www/$username/$websitename/backup-$websitename.sh /etc/cron.weekly/backup-$websitename.sh
-chmod +x /etc/cron.weekly/backup-$websitename.sh
+cp /var/www/$username/$websitename/backup-$websitename.sh /etc/cron.weekly/backup-$username
+chmod +x /etc/cron.weekly/backup-$username
 
 clear
 echo " ";
