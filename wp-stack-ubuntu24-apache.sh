@@ -256,11 +256,18 @@ APC
 
 ensure_site_prereqs() {
   log "Checking prerequisites for site creation..."
-  systemctl is-active --quiet apache2 || systemctl start apache2 || true
-  if ! systemctl list-unit-files | awk '{print $1}' | grep -qx "apache2.service"; then
-    err "Apache2 not found. Please run 'Install/Update Base LAMP Stack' first."
+
+  if ! command -v apache2ctl >/dev/null 2>&1 && ! dpkg -s apache2 >/dev/null 2>&1; then
+    err "Apache2 not installed. Please run 'Install/Update Base LAMP Stack' first."
     exit 1
   fi
+
+  if ! systemctl list-unit-files --type=service --all | grep -qE '^apache2\.service'; then
+    err "Apache2 systemd unit not found. Please run 'Install/Update Base LAMP Stack' first."
+    exit 1
+  fi
+
+  systemctl is-active --quiet apache2 || systemctl start apache2 || true
   # MySQL/MariaDB
   local db_service=""
   for svc in mysql mariadb mysqld; do
