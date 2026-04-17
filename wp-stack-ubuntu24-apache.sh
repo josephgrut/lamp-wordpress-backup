@@ -200,8 +200,8 @@ create_site() {
   echo "Enter Linux username to own the site (letters, digits, underscore):"; read -r user
   echo "Admin email (WordPress):"; read -r email
   echo "Site title:"; read -r title
-  echo "Comma-separated plugin slugs to install (e.g. redis-cache,wordpress-seo,contact-form-7):"; read -r plugins
-  echo "Theme slug to install and activate (e.g. astra, generatepress) or leave blank:"; read -r theme
+  echo "Comma-separated plugin slugs to install (defaults included automatically: redis-cache,wordpress-seo,contact-form-7,flamingo,redirection,safe-svg,classic-editor):"; read -r plugins
+  echo "Theme slug to install and activate (default generatepress; leave blank to use it):"; read -r theme
 
   if [[ -z "$domain" || -z "$user" || -z "$email" || -z "$title" ]]; then
     err "Domain, user, email, and site title are required."
@@ -261,6 +261,39 @@ create_site() {
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always set X-XSS-Protection "1; mode=block"
 
+    # Static asset caching
+    <IfModule mod_expires.c>
+      ExpiresActive On
+      ExpiresDefault "access plus 1 month"
+      ExpiresByType text/css "access plus 1 year"
+      ExpiresByType application/javascript "access plus 1 year"
+      ExpiresByType application/x-javascript "access plus 1 year"
+      ExpiresByType application/json "access plus 1 hour"
+      ExpiresByType image/svg+xml "access plus 1 year"
+      ExpiresByType image/x-icon "access plus 1 year"
+      ExpiresByType image/jpeg "access plus 1 year"
+      ExpiresByType image/jpg  "access plus 1 year"
+      ExpiresByType image/png  "access plus 1 year"
+      ExpiresByType image/gif  "access plus 1 year"
+      ExpiresByType image/webp "access plus 1 year"
+      ExpiresByType font/ttf   "access plus 1 year"
+      ExpiresByType font/otf   "access plus 1 year"
+      ExpiresByType font/woff  "access plus 1 year"
+      ExpiresByType font/woff2 "access plus 1 year"
+    </IfModule>
+
+    <IfModule mod_headers.c>
+      <FilesMatch "\.(css|js)$">
+        Header set Cache-Control "public, max-age=31536000"
+      </FilesMatch>
+      <FilesMatch "\.(jpg|jpeg|png|gif|webp|avif|ico|svg|svgz|ttf|otf|woff|woff2|eot)$">
+        Header set Cache-Control "public, max-age=31536000"
+      </FilesMatch>
+      <FilesMatch "\.(html)$">
+        Header set Cache-Control "no-cache"
+      </FilesMatch>
+    </IfModule>
+
     # Block XML-RPC
     <Files "xmlrpc.php">
         Require all denied
@@ -301,7 +334,11 @@ SQL
   local site_url="http://${domain}"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp core install --url='${site_url}' --title='${title}' --admin_user='${admin_user}' --admin_password='${admin_pass}' --admin_email='${email}'"
 
-  # Plugins
+  # Plugins: install defaults "out of the box" and also any user-specified
+  DEFAULT_PLUGINS=(redis-cache wordpress-seo contact-form-7 flamingo redirection safe-svg classic-editor)
+  for p in "${DEFAULT_PLUGINS[@]}"; do
+    sudo -u "$user" -H bash -c "cd '$web_dir' && wp plugin install '$p' --activate || true"
+  done
   if [[ -n "${plugins//,/}" ]]; then
     IFS=',' read -ra P_ARR <<<"$plugins"
     for p in "${P_ARR[@]}"; do
@@ -311,9 +348,12 @@ SQL
     done
   fi
 
-  # Theme
+  # Theme: always ensure generatepress installed; activate it if no custom theme provided
+  sudo -u "$user" -H bash -c "cd '$web_dir' && wp theme install generatepress || true"
   if [[ -n "${theme:-}" ]]; then
     sudo -u "$user" -H bash -c "cd '$web_dir' && wp theme install '${theme}' --activate || true"
+  else
+    sudo -u "$user" -H bash -c "cd '$web_dir' && wp theme activate generatepress || true"
   fi
 
   # Redis cache if plugin requested or installed separately
@@ -410,7 +450,7 @@ CRON
   cat >"$bscript" <<BASH
 #!/usr/bin/env bash
 set -Eeuo pipefail
-keepdays=7
+keepdays=28
 backupdate=\$(date +%Y%m%d-%H%M)
 web_dir="${web_dir}"
 backup_dir="${backup_dir}"
@@ -429,7 +469,8 @@ BASH
   cat >"/etc/cron.d/backup-${domain}" <<CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-30 3 * * * root ${bscript} >/dev/null 2>&1
+# Weekly backups: Sunday 03:30
+30 3 * * 0 root ${bscript} >/dev/null 2>&1
 CRON
 
   # Fail2ban jail for repeated 403/404 in Apache logs
@@ -471,7 +512,7 @@ WP admin pass:  ${admin_pass}
 WP path:        ${web_dir}
 
 Backups dir:    ${backup_dir}
-Backup script:  /usr/local/bin/wp-backup-${domain}.sh (daily 03:30)
+Backup script:  /usr/local/bin/wp-backup-${domain}.sh (weekly Sun 03:30, retain 4 weeks)
 
 AWStats URL:    http://${domain}/awstats/
 AWStats user:   ${aw_user}
