@@ -159,6 +159,87 @@ has_dns_record() {
   getent ahosts "$name" >/dev/null 2>&1
 }
 
+create_ssl_vhost() {
+  local domain="$1"
+  local web_dir="$2"
+  local conf="/etc/apache2/sites-available/${domain}-le-ssl.conf"
+
+  cat >"$conf" <<APV
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+    DocumentRoot ${web_dir}
+
+    ErrorLog /var/log/apache2/${domain}/error.log
+    CustomLog /var/log/apache2/${domain}/access.log combined
+
+    <Directory ${web_dir}>
+        AllowOverride All
+        Require all granted
+        Options -Indexes +FollowSymLinks
+        LimitRequestBody 0
+    </Directory>
+
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/${domain}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${domain}/privkey.pem
+    SSLCertificateChainFile /etc/letsencrypt/live/${domain}/chain.pem
+
+    <FilesMatch "\.(css|js)$">
+      Header set Cache-Control "public, max-age=31536000"
+    </FilesMatch>
+    <FilesMatch "\.(jpg|jpeg|png|gif|webp|avif|ico|svg|svgz|ttf|otf|woff|woff2|eot)$">
+      Header set Cache-Control "public, max-age=31536000"
+    </FilesMatch>
+    <FilesMatch "\.(html)$">
+      Header set Cache-Control "no-cache"
+    </FilesMatch>
+
+    <Files "xmlrpc.php">
+        Require all denied
+    </Files>
+
+    RewriteEngine On
+    RewriteCond %{HTTP_USER_AGENT} (ahrefs|semrush|mj12bot|dotbot|curl|wget|python-requests|axios|scrapy|libwww-perl) [NC]
+    RewriteRule ^ - [F]
+</VirtualHost>
+</IfModule>
+APV
+
+  a2ensite "${domain}-le-ssl.conf" >/dev/null 2>&1 || true
+  apache2ctl configtest && systemctl reload apache2
+}
+
+issue_ssl_certificate() {
+  local domain="$1"
+  local web_dir="$2"
+  local email="$3"
+  install_certbot
+
+  local cert_domains=("-w" "$web_dir" "-d" "$domain")
+  if has_dns_record "www.${domain}"; then
+    cert_domains+=("-d" "www.${domain}")
+  else
+    warn "No DNS record detected for www.${domain}; skipping it."
+  fi
+
+  ufw allow 'Apache Full' >/dev/null 2>&1 || true
+  apache2ctl configtest && systemctl reload apache2 || true
+
+  if certbot certonly --webroot "${cert_domains[@]}" --agree-tos -m "${email}" --deploy-hook "systemctl reload apache2" -n; then
+    log "Let's Encrypt certificate issued successfully for ${domain}."
+    create_ssl_vhost "$domain" "$web_dir"
+  else
+    warn "Certbot webroot issuance failed. Please verify DNS and rerun: certbot certonly --webroot -w ${web_dir} -d ${domain} [-d www.${domain}]"
+  fi
+}
+
 apache_global_hardening() {
   log "Configuring Apache global security headers..."
   cat >/etc/apache2/conf-available/security-headers.conf <<'APC'
@@ -231,6 +312,8 @@ create_site() {
 
   log "Creating system user and directories..."
   mkdir -p "$web_dir" "$log_dir"
+  # Prepare ACME challenge path to avoid rewrite/404 issues
+  mkdir -p "$web_dir/.well-known/acme-challenge"
   id -u "$user" >/dev/null 2>&1 || adduser --quiet --disabled-password --gecos "" --home "$web_dir" "$user"
   echo "$user:$sys_pass" | chpasswd
   mkdir -p "$backup_dir"
@@ -260,6 +343,15 @@ create_site() {
     Header always set X-Frame-Options "SAMEORIGIN"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
     Header always set X-XSS-Protection "1; mode=block"
+
+    # ACME challenge alias (Let's Encrypt)
+    Alias /.well-known/acme-challenge/ ${web_dir}/.well-known/acme-challenge/
+    <Directory ${web_dir}/.well-known/acme-challenge/>
+      Options None
+      AllowOverride None
+      ForceType text/plain
+      Require all granted
+    </Directory>
 
     # Static asset caching
     <IfModule mod_expires.c>
@@ -531,20 +623,7 @@ CREDS
   echo ""
   read -rp "Issue and configure Let's Encrypt SSL now for ${domain}? [y/N]: " do_ssl
   if [[ "${do_ssl,,}" == "y" ]]; then
-    install_certbot
-    local cert_domains=("-d" "${domain}")
-    if has_dns_record "www.${domain}"; then
-      cert_domains+=("-d" "www.${domain}")
-    else
-      warn "No DNS record detected for www.${domain}; skipping it."
-    fi
-    ufw allow 'Apache Full' >/dev/null 2>&1 || true
-    if certbot --apache "${cert_domains[@]}" --redirect --agree-tos -m "${email}" -n; then
-      log "Let's Encrypt certificate installed and Apache configured for HTTPS."
-      systemctl reload apache2 || true
-    else
-      warn "Certbot failed. Verify DNS for all domains and rerun: certbot --apache -d ${domain} [-d www.${domain}] --redirect"
-    fi
+    issue_ssl_certificate "$domain" "$web_dir" "$email"
   fi
 }
 
