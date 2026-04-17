@@ -24,8 +24,8 @@ err()  { echo -e "[x] $*" >&2; }
 trap 'err "Error on line $LINENO: $BASH_COMMAND"' ERR
 
 random_password() {
-  # 24-char mixed password
-  tr -dc 'A-Za-z0-9!@#%^*_+-=' </dev/urandom | head -c 24
+  # 24-char mixed password (robust; avoids pipefail SIGPIPE)
+  perl -e 'my @c=("a".."z","A".."Z",0..9,qw(! @ # % ^ * _ + - =)); print join("", map { $c[int rand @c] } 1..24)'
 }
 
 # Normalize and validate a Linux username: lowercase, [a-z0-9_], start with a letter, max 31 chars
