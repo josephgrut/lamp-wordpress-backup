@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# WordPress LEMP Auto-Provisioner for Ubuntu 24.04
+# WordPress LAMP Auto-Provisioner for Ubuntu 24.04 (Apache)
 # Version: 1.0.0
 # Author: Your Team
 # License: MIT
 
-# Changelog (see README.md for details):
-# 1.0.0 - Initial release for Ubuntu 24.04 (LEMP, WP-CLI, AWStats, backups, basic bot protection)
+# Changelog
+# 1.0.0 - Initial Apache-based release (LAMP, WP-CLI, AWStats static, backups, bot protection, optional SSL)
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "This script must be run as root." >&2
@@ -16,68 +16,25 @@ fi
 
 VERSION="1.0.0"
 
-log() { echo -e "[+] $*"; }
+log()  { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
 err()  { echo -e "[x] $*" >&2; }
-
-# Basic error trap to surface failing step
 trap 'err "Error on line $LINENO: $BASH_COMMAND"' ERR
 
 random_password() {
-  # 24-char mixed password (robust; avoids pipefail SIGPIPE)
   perl -e 'my @c=("a".."z","A".."Z",0..9,qw(! @ # % ^ * _ + - =)); print join("", map { $c[int rand @c] } 1..24)'
 }
 
 # Normalize and validate a Linux username: lowercase, [a-z0-9_], start with a letter, max 31 chars
 normalize_linux_username() {
-  local in="$1"
-  local out
+  local in="$1" out
   out=$(echo -n "$in" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_')
   out=$(echo -n "$out" | sed -E 's/^[^a-z]+//')
   out=${out:0:31}
   echo -n "$out"
 }
 
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { err "Missing required command: $1"; exit 1; }
-}
-
 ensure_ubuntu_2404() {
-
-  # Detect installed PHP-FPM service (prefers highest version) and set globals
-  PHP_FPM_SERVICE=""
-  PHP_FPM_SOCK=""
-  detect_php_fpm() {
-    local services
-    services=$(systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -E '^php[0-9]+\.[0-9]+-fpm\.service$' | sort -V)
-    if [[ -z "$services" ]]; then
-      if systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx 'php-fpm.service'; then
-        PHP_FPM_SERVICE="php-fpm"
-        PHP_FPM_SOCK="/run/php/php-fpm.sock"
-        return 0
-      fi
-      return 1
-    fi
-    PHP_FPM_SERVICE=$(echo "$services" | tail -n1 | sed 's/\.service$//')
-    PHP_FPM_SOCK="/run/php/${PHP_FPM_SERVICE}.sock"
-    return 0
-  }
-
-  ensure_php_socket_symlink() {
-    [[ -z "$PHP_FPM_SERVICE" ]] && detect_php_fpm || true
-    local actual_sock="/run/php/${PHP_FPM_SERVICE}.sock"
-    local generic_sock="/run/php/php-fpm.sock"
-    # Wait briefly for socket to appear
-    for i in {1..10}; do
-      [[ -S "$actual_sock" ]] && break || sleep 0.5
-    done
-    if [[ -S "$actual_sock" ]]; then
-      mkdir -p /run/php
-      ln -snf "$actual_sock" "$generic_sock"
-      return 0
-    fi
-    return 1
-  }
   . /etc/os-release
   if [[ "${ID}" != "ubuntu" ]]; then
     err "This script supports Ubuntu only. Detected: ${ID}"
@@ -89,7 +46,7 @@ ensure_ubuntu_2404() {
 }
 
 apt_install_base() {
-  log "Updating system and installing base packages..."
+  log "Updating system and installing base LAMP packages..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get upgrade -y
@@ -97,20 +54,20 @@ apt_install_base() {
     software-properties-common apt-transport-https ca-certificates \
     curl wget unzip zip git htop mc nano jq pwgen whois \
     ufw fail2ban unattended-upgrades openssh-server \
-    nginx mysql-server \
-    php8.3 php8.3-fpm php8.3-cli php8.3-opcache php8.3-mysql php8.3-curl \
+    apache2 mysql-server \
+    php8.3 libapache2-mod-php8.3 php8.3-cli php8.3-opcache php8.3-mysql php8.3-curl \
     php8.3-xml php8.3-zip php8.3-mbstring php8.3-gd php8.3-intl php8.3-soap \
     php-imagick redis-server php8.3-redis \
-    awstats perl apache2-utils
+    awstats perl apache2-utils \
+    certbot python3-certbot-apache
 
-  systemctl enable --now nginx
+  a2enmod rewrite headers expires http2 ssl proxy proxy_http proxy_fcgi setenvif >/dev/null 2>&1 || true
+  systemctl enable --now apache2
   systemctl enable --now mysql
-  systemctl enable --now php8.3-fpm
   systemctl enable --now redis-server
 }
 
 secure_mysql_if_needed() {
-  # On Ubuntu 24.04, MySQL root typically uses auth_socket. We run secure steps directly.
   log "Hardening MySQL (local only, remove test DB)..."
   mysql --protocol=socket <<SQL
 DELETE FROM mysql.user WHERE User='';
@@ -122,8 +79,8 @@ SQL
 }
 
 configure_php() {
-  log "Configuring PHP 8.3..."
-  local ini=/etc/php/8.3/fpm/php.ini
+  log "Configuring PHP 8.3 (apache2 SAPI)..."
+  local ini=/etc/php/8.3/apache2/php.ini
   sed -ri 's/^;?memory_limit\s*=.*/memory_limit = 256M/' "$ini"
   sed -ri 's/^;?upload_max_filesize\s*=.*/upload_max_filesize = 128M/' "$ini"
   sed -ri 's/^;?post_max_size\s*=.*/post_max_size = 128M/' "$ini"
@@ -131,8 +88,7 @@ configure_php() {
   sed -ri 's/^;?opcache.enable\s*=.*/opcache.enable=1/' "$ini"
   sed -ri 's/^;?opcache.memory_consumption\s*=.*/opcache.memory_consumption=256/' "$ini"
   sed -ri 's/^;?opcache.max_accelerated_files\s*=.*/opcache.max_accelerated_files=20000/' "$ini"
-  sed -ri 's/^;?cgi.fix_pathinfo\s*=.*/cgi.fix_pathinfo=0/' "$ini"
-  systemctl restart php8.3-fpm
+  systemctl restart apache2
 }
 
 configure_ufw() {
@@ -141,7 +97,7 @@ configure_ufw() {
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow OpenSSH
-  ufw allow 'Nginx Full'
+  ufw allow 'Apache Full'
   ufw --force enable
 }
 
@@ -174,7 +130,6 @@ setup_ssh_access() {
     sed -ri 's/^#?PasswordAuthentication\s+.*/PasswordAuthentication no/' "$cfg"
     sed -ri 's/^#?ChallengeResponseAuthentication\s+.*/ChallengeResponseAuthentication no/' "$cfg"
     sed -ri 's/^#?UsePAM\s+.*/UsePAM yes/' "$cfg"
-    # Allow root with key only (no password)
     sed -ri 's/^#?PermitRootLogin\s+.*/PermitRootLogin prohibit-password/' "$cfg"
     sed -ri 's/^#?PubkeyAuthentication\s+.*/PubkeyAuthentication yes/' "$cfg"
     systemctl restart ssh || systemctl restart sshd || true
@@ -192,152 +147,51 @@ install_wp_cli() {
 
 install_certbot() {
   if ! command -v certbot >/dev/null 2>&1; then
-    log "Installing Certbot (Let's Encrypt) for Nginx..."
+    log "Installing Certbot (Let's Encrypt) for Apache..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y certbot python3-certbot-nginx
+    apt-get install -y certbot python3-certbot-apache
   fi
 }
 
 has_dns_record() {
-  # Returns 0 if any A/AAAA record resolves via glibc (DNS), else 1
   local name="$1"
   getent ahosts "$name" >/dev/null 2>&1
 }
 
-ensure_ssl_vhost_rules() {
-  local domain="$1" web_dir="$2" aw_dir="$3"
-  local conf=""
-  if [[ -f "/etc/nginx/sites-available/${domain}-le-ssl.conf" ]]; then
-    conf="/etc/nginx/sites-available/${domain}-le-ssl.conf"
-  elif [[ -f "/etc/nginx/sites-enabled/${domain}-le-ssl.conf" ]]; then
-    conf="/etc/nginx/sites-enabled/${domain}-le-ssl.conf"
-  else
-    # Try to locate any 443 server block for this domain
-    local cand
-    cand=$(grep -rl "server_name[[:space:]]\+${domain}\b" /etc/nginx/sites-available 2>/dev/null | xargs -r grep -l "listen[[:space:]]\+443" | head -n1 || true)
-    [[ -n "$cand" ]] && conf="$cand"
-  fi
-  if [[ -z "$conf" ]]; then
-    warn "SSL vhost for ${domain} not found for hardening."
-    return 0
-  fi
-
-  # Helper to insert a line before last closing brace if missing
-  add_line_if_missing() {
-    local pattern="$1"; shift
-    local line="$*"
-    if ! grep -qE "$pattern" "$conf"; then
-      perl -0777 -pe 's#\n}\s*\z#\n    '"$line"'\n}\n#s' -i "$conf"
-    fi
-  }
-
-  # Insert includes and body size
-  add_line_if_missing 'snippets/security-common\.conf' 'include snippets/security-common.conf;'
-  add_line_if_missing 'snippets/wp-protect\.conf' 'include snippets/wp-protect.conf;'
-  add_line_if_missing 'client_max_body_size' 'client_max_body_size 128M;'
-
-  # Ensure PHP location exists
-  if ! grep -qE 'location[[:space:]]+~[[:space:]]+\\\.php\$' "$conf"; then
-    perl -0777 -pe 's#\n}\s*\z#\n    location ~ \\ \\.php\$ {\n        include snippets/fastcgi-php.conf;\n        fastcgi_pass unix:/run/php/php-fpm.sock;\n        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;\n        include fastcgi_params;\n    }\n}\n#s' -i "$conf"
-  fi
-
-  # Ensure main location / exists with proper try_files (optional: only add if missing)
-  if ! grep -qE 'location[[:space:]]+/[[:space:]]*\{' "$conf"; then
-    perl -0777 -pe 's#\n}\s*\z#\n    location / {\n        try_files \$uri \$uri/ /index.php?\$args;\n    }\n}\n#s' -i "$conf"
-  fi
+apache_global_hardening() {
+  log "Configuring Apache global security headers..."
+  cat >/etc/apache2/conf-available/security-headers.conf <<'APC'
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set X-XSS-Protection "1; mode=block"
+</IfModule>
+APC
+  a2enconf security-headers >/dev/null 2>&1 || true
+  systemctl reload apache2 || systemctl restart apache2
 }
 
 ensure_site_prereqs() {
   log "Checking prerequisites for site creation..."
-  # Ensure core services exist and are running
-  if command -v nginx >/dev/null 2>&1; then
-    systemctl is-active --quiet nginx || systemctl start nginx || true
-  else
-    err "Nginx not found. Please run 'Install/Update Base LEMP Stack' first."
+  systemctl is-active --quiet apache2 || systemctl start apache2 || true
+  if ! systemctl list-unit-files | awk '{print $1}' | grep -qx "apache2.service"; then
+    err "Apache2 not found. Please run 'Install/Update Base LAMP Stack' first."
     exit 1
   fi
-
-  # Detect MySQL/MariaDB service name robustly
+  # MySQL/MariaDB
   local db_service=""
   for svc in mysql mariadb mysqld; do
-    if systemctl list-unit-files | awk '{print $1}' | grep -qx "${svc}.service"; then
-      db_service="$svc"; break
-    fi
+    if systemctl list-unit-files | awk '{print $1}' | grep -qx "${svc}.service"; then db_service="$svc"; break; fi
   done
   if [[ -z "$db_service" ]]; then
-    # Fallback: if mysql client exists, try starting common service names
-    if command -v mysql >/dev/null 2>&1; then
-      for svc in mysql mariadb mysqld; do systemctl start "$svc" 2>/dev/null && db_service="$svc" && break; done
-    fi
+    if command -v mysql >/dev/null 2>&1; then for svc in mysql mariadb mysqld; do systemctl start "$svc" 2>/dev/null && db_service="$svc" && break; done; fi
   fi
-  if [[ -z "$db_service" ]]; then
-    err "MySQL/MariaDB service not found. Please run 'Install/Update Base LEMP Stack' first."
-    exit 1
-  else
-    systemctl is-active --quiet "$db_service" || systemctl start "$db_service" || true
-  fi
-
-  # PHP-FPM service check (any supported version) and ensure generic socket symlink
-  if detect_php_fpm; then
-    systemctl is-active --quiet "$PHP_FPM_SERVICE" || systemctl start "$PHP_FPM_SERVICE" || true
-    ensure_php_socket_symlink || warn "Could not create generic php-fpm socket symlink; ensure nginx uses correct socket."
-  else
-    err "PHP-FPM service not found. Please run 'Install/Update Base LEMP Stack' first."
-    exit 1
-  fi
-
+  if [[ -z "$db_service" ]]; then err "MySQL/MariaDB service not found. Install base stack first."; exit 1; fi
+  systemctl is-active --quiet "$db_service" || systemctl start "$db_service" || true
   install_wp_cli
-
-  # Ensure global hardening applied at least once
-  [[ -f /etc/nginx/conf.d/limits.conf ]] || nginx_global_hardening
-}
-
-nginx_global_hardening() {
-  log "Configuring Nginx global hardening & rate limits..."
-  # Global http context config
-  cat >/etc/nginx/conf.d/limits.conf <<'NGX'
-limit_req_zone $binary_remote_addr zone=wp:10m rate=10r/s;
-map $http_user_agent $bad_bot {
-    default 0;
-    ~*(ahrefs|semrush|mj12bot|dotbot|curl|wget|python-requests|axios|scrapy|libwww-perl) 1;
-}
-NGX
-
-  # Global upload/body size limit for both HTTP and HTTPS
-  cat >/etc/nginx/conf.d/uploads.conf <<'NGX'
-client_max_body_size 128M;
-NGX
-
-  # Snippet to include in server blocks
-  mkdir -p /etc/nginx/snippets
-  cat >/etc/nginx/snippets/security-common.conf <<'NGX'
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-add_header X-XSS-Protection "1; mode=block" always;
-NGX
-
-  cat >/etc/nginx/snippets/wp-protect.conf <<'NGX'
-# Basic bot deny
-if ($bad_bot) { return 403; }
-
-# Block XML-RPC (reduce brute force and pingback abuse)
-location = /xmlrpc.php { deny all; }
-
-# Harden uploads - no script execution
-location ~* /(?:uploads|files)/.*\.php$ { deny all; }
-
-# Tighten login/heartbeat rate limits
-location = /wp-login.php { limit_req zone=wp burst=20 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:/run/php/php-fpm.sock; }
-location ~* /wp-admin/admin-ajax\.php$ {
-  limit_req zone=wp burst=60 nodelay;
-  include snippets/fastcgi-php.conf;
-  fastcgi_pass unix:/run/php/php-fpm.sock;
-}
-NGX
-
-  systemctl reload nginx || systemctl restart nginx
+  apache_global_hardening
 }
 
 create_site() {
@@ -354,22 +208,15 @@ create_site() {
     exit 1
   fi
 
-  # Sanitize and validate Linux username
   local user_raw="$user"
   user=$(normalize_linux_username "$user_raw")
-  if [[ -z "$user" ]]; then
-    err "Provided username '$user_raw' is invalid after normalization. Use letters, digits or underscore, starting with a letter."
+  if [[ -z "$user" || "$user" == "root" ]]; then
+    err "Invalid username. Use letters, digits or underscore, starting with a letter (not 'root')."
     exit 1
   fi
-  if [[ "$user" == "root" ]]; then
-    err "Username 'root' is not allowed. Choose another."
-    exit 1
-  fi
-  if [[ "$user" != "$user_raw" ]]; then
-    warn "Username normalized to '$user' from '$user_raw'."
-  fi
+  if [[ "$user" != "$user_raw" ]]; then warn "Username normalized to '$user' from '$user_raw'."; fi
 
-  local db_name db_user db_pass sys_pass admin_user admin_pass root_dir web_dir log_dir backup_dir aw_dir
+  local db_name db_user db_pass sys_pass admin_user admin_pass root_dir web_dir log_dir backup_dir
   db_name="${user//[^a-zA-Z0-9_]/_}_wp"
   db_user="${user//[^a-zA-Z0-9_]/_}_u"
   db_pass=$(random_password)
@@ -379,11 +226,10 @@ create_site() {
 
   root_dir="/var/www/${user}/${domain}"
   web_dir="${root_dir}/www"
-  log_dir="/var/log/nginx/${domain}"
+  log_dir="/var/log/apache2/${domain}"
   backup_dir="${root_dir}/backups"
 
   log "Creating system user and directories..."
-  # Ensure target home path exists prior to adduser (nested path)
   mkdir -p "$web_dir" "$log_dir"
   id -u "$user" >/dev/null 2>&1 || adduser --quiet --disabled-password --gecos "" --home "$web_dir" "$user"
   echo "$user:$sys_pass" | chpasswd
@@ -391,51 +237,44 @@ create_site() {
   chown -R "$user":www-data "/var/www/${user}"
   chmod -R 775 "/var/www/${user}"
 
-    aw_dir="${web_dir}/awstats"
-    log "Configuring Nginx vhost for ${domain}..."
-  cat >"/etc/nginx/sites-available/${domain}.conf" <<NGX
-server {
-    listen 80;
-    server_name ${domain} www.${domain};
-    root ${web_dir};
-    index index.php index.html index.htm;
-    client_max_body_size 128M;
+  log "Configuring Apache vhost for ${domain}..."
+  cat >"/etc/apache2/sites-available/${domain}.conf" <<APV
+<VirtualHost *:80>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+    DocumentRoot ${web_dir}
 
-    access_log ${log_dir}/access.log;
-    error_log  ${log_dir}/error.log;
+    ErrorLog ${log_dir}/error.log
+    CustomLog ${log_dir}/access.log combined
 
-    include snippets/security-common.conf;
-    include snippets/wp-protect.conf;
+    <Directory ${web_dir}>
+        AllowOverride All
+        Require all granted
+        Options -Indexes +FollowSymLinks
+        # Unlimited body size at Apache level (PHP still enforces 128M)
+        LimitRequestBody 0
+    </Directory>
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
+    # Security headers
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
 
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-      fastcgi_pass unix:/run/php/php-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
+    # Block XML-RPC
+    <Files "xmlrpc.php">
+        Require all denied
+    </Files>
 
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|webp)$ {
-        expires max;
-        log_not_found off;
-    }
-
-    # AWStats static reports (protected)
-    location /awstats {
-      auth_basic "Restricted";
-      auth_basic_user_file ${aw_dir}/.htpasswd;
-      alias ${aw_dir}/;
-      autoindex on;
-      try_files \$uri \$uri/ =404;
-    }
-}
-NGX
-  ln -sf "/etc/nginx/sites-available/${domain}.conf" "/etc/nginx/sites-enabled/${domain}.conf"
-  nginx -t
-  systemctl reload nginx
+    # Basic bad bot blocking
+    RewriteEngine On
+    RewriteCond %{HTTP_USER_AGENT} (ahrefs|semrush|mj12bot|dotbot|curl|wget|python-requests|axios|scrapy|libwww-perl) [NC]
+    RewriteRule ^ - [F]
+</VirtualHost>
+APV
+  a2ensite "${domain}.conf" >/dev/null 2>&1 || true
+  apache2ctl configtest
+  systemctl reload apache2
 
   log "Creating MySQL database and user..."
   mysql --protocol=socket <<SQL
@@ -451,7 +290,6 @@ SQL
   if [[ ! -f "${web_dir}/wp-config.php" ]]; then
     sudo -u "$user" -H bash -c "cd '$web_dir' && wp config create --dbname='${db_name}' --dbuser='${db_user}' --dbpass='${db_pass}' --dbhost='localhost' --dbprefix='wp_' --skip-check"
   fi
-  # Ensure required constants (strings quoted, booleans raw)
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set FS_METHOD direct --type=constant"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set WP_AUTO_UPDATE_CORE true --type=constant --raw"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set DISALLOW_FILE_EDIT true --type=constant --raw"
@@ -484,25 +322,23 @@ SQL
     sudo -u "$user" -H bash -c "cd '$web_dir' && wp redis enable || true"
   fi
 
-  # WordPress settings requested: disable year/month folders and set permalink structure
+  # WordPress options
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp option update uploads_use_yearmonth_folders 0"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp rewrite structure '/%category%/%postname%'"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp rewrite flush --hard"
 
-  # Set secure permissions for uploads dir
+  # Permissions
   mkdir -p "$web_dir/wp-content/uploads"
   chown -R "$user":www-data "$web_dir"
-  # Base perms
   find "$web_dir" -type d -exec chmod 755 {} +
   find "$web_dir" -type f -exec chmod 644 {} +
-  # Allow PHP-FPM (www-data group) to write into wp-content
   if [[ -d "$web_dir/wp-content" ]]; then
     find "$web_dir/wp-content" -type d -exec chmod 775 {} +
     find "$web_dir/wp-content" -type f -exec chmod 664 {} +
     chmod g+s "$web_dir/wp-content" "$web_dir/wp-content/uploads" 2>/dev/null || true
   fi
 
-  # robots.txt (basic)
+  # robots.txt
   cat >"$web_dir/robots.txt" <<ROB
 User-agent: *
 Disallow: /cgi-bin/
@@ -514,28 +350,46 @@ ROB
   chown "$user":www-data "$web_dir/robots.txt"
   chmod 644 "$web_dir/robots.txt"
 
-  # AWStats per-site configuration and nightly static reports
+  # AWStats per-site config and static pages
   log "Configuring AWStats for ${domain}..."
   local awconf="/etc/awstats/awstats.${domain}.conf"
   if [[ ! -f "$awconf" ]]; then
     cp /etc/awstats/awstats.conf "$awconf"
-    perl -pi -e "s#^LogFile=.*#LogFile=\"/var/log/nginx/${domain}/access.log\"#" "$awconf"
+    perl -pi -e "s#^LogFile=.*#LogFile=\"/var/log/apache2/${domain}/access.log\"#" "$awconf"
     perl -pi -e "s#^SiteDomain=.*#SiteDomain=\"${domain}\"#" "$awconf"
     perl -pi -e "s#^HostAliases=.*#HostAliases=\"www.${domain} 127.0.0.1 localhost\"#" "$awconf"
-    perl -pi -e "s#^LogFormat=.*#LogFormat=1#" "$awconf"  # Nginx combined
+    perl -pi -e "s#^LogFormat=.*#LogFormat=1#" "$awconf"
     perl -pi -e "s#^DirData=.*#DirData=\"/var/lib/awstats\"#" "$awconf"
   fi
 
-  # Generate static reports daily and protect with basic auth
+  local aw_dir="${web_dir}/awstats"
   mkdir -p "$aw_dir"
   local aw_user="awstats"
   local aw_pass
   aw_pass=$(random_password)
   htpasswd -b -c "$aw_dir/.htpasswd" "$aw_user" "$aw_pass" >/dev/null 2>&1 || true
 
-  nginx -t && systemctl reload nginx
+  # Serve static reports via /awstats with Basic Auth
+  if ! grep -q "/awstats" "/etc/apache2/sites-available/${domain}.conf"; then
+    cat >>"/etc/apache2/sites-available/${domain}.conf" <<APV
 
-  # Cron for AWStats updates and static pages
+    <Location "/awstats">
+        AuthType Basic
+        AuthName "Restricted"
+        AuthUserFile ${aw_dir}/.htpasswd
+        Require valid-user
+    </Location>
+    Alias /awstats ${aw_dir}/
+    <Directory ${aw_dir}>
+        Require all granted
+        Options Indexes FollowSymLinks
+        AllowOverride None
+    </Directory>
+APV
+    apache2ctl configtest && systemctl reload apache2
+  fi
+
+  # Cron for AWStats updates and static HTML
   cat >"/etc/cron.d/awstats-${domain}" <<CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -543,14 +397,14 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 15 2 * * * root perl /usr/share/awstats/tools/awstats_buildstaticpages.pl -update -config=${domain} -dir=${aw_dir} -awstatsprog=/usr/lib/cgi-bin/awstats.pl >/dev/null 2>&1
 CRON
 
-  # Real cron for WP events via WP-CLI (avoids web traffic triggered cron)
+  # Real cron for WP events
   cat >"/etc/cron.d/wp-cron-${user}-${domain}" <<CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 */5 * * * * ${user} /usr/local/bin/wp --path=${web_dir} --allow-root cron event run --due-now >/dev/null 2>&1
 CRON
 
-  # Backups: daily DB + files, retention 7 days
+  # Backups: daily DB + files, rotation 7 days
   log "Setting up daily backups with rotation..."
   local bscript="/usr/local/bin/wp-backup-${domain}.sh"
   cat >"$bscript" <<BASH
@@ -567,7 +421,7 @@ mkdir -p "\${backup_dir}"
 cd "\${backup_dir}"
 mysqldump -u "\${db_user}" -p"\${db_pass}" "\${db_name}" | gzip -9 > "\${backupdate}-${domain}-db.sql.gz"
 tar -czf "\${backupdate}-${domain}-files.tar.gz" -C "\${web_dir}" .
-tar -czf "\${backupdate}-${domain}-nginx-logs.tar.gz" -C "/var/log/nginx/${domain}" . || true
+tar -czf "\${backupdate}-${domain}-apache-logs.tar.gz" -C "/var/log/apache2/${domain}" . || true
 chmod 600 "\${backupdate}-${domain}-"*.gz
 find "\${backup_dir}" -type f -mtime +"\${keepdays}" -delete
 BASH
@@ -578,21 +432,20 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 30 3 * * * root ${bscript} >/dev/null 2>&1
 CRON
 
-  # Fail2ban basic protection (sshd enabled by default);
-  # Add a jail to act on repeated 403/404 (rate-limited/bad bot behavior)
+  # Fail2ban jail for repeated 403/404 in Apache logs
   mkdir -p /etc/fail2ban/filter.d
-  cat >/etc/fail2ban/filter.d/nginx-4xx.conf <<'F2B'
+  cat >/etc/fail2ban/filter.d/apache-4xx.conf <<'F2B'
 [Definition]
 failregex = ^<HOST> -.* "(GET|POST).*" (403|404) .*
 ignoreregex =
 F2B
-  if ! grep -q "\[nginx-4xx\]" /etc/fail2ban/jail.local 2>/dev/null; then
+  if ! grep -q "\[apache-4xx\]" /etc/fail2ban/jail.local 2>/dev/null; then
     cat >>/etc/fail2ban/jail.local <<'F2B'
-[nginx-4xx]
+[apache-4xx]
 enabled = true
-filter = nginx-4xx
+filter = apache-4xx
 port = http,https
-logpath = /var/log/nginx/*/access.log
+logpath = /var/log/apache2/*/access.log
 maxretry = 50
 findtime = 600
 bantime = 1800
@@ -603,8 +456,8 @@ F2B
   # Credentials summary
   local summary="/root/wp-stack-credentials-${domain}.txt"
   cat >"$summary" <<CREDS
-WordPress LEMP Provisioner v${VERSION} - Credentials for ${domain}
-=================================================================
+WordPress LAMP Provisioner (Apache) v${VERSION} - Credentials for ${domain}
+==========================================================================
 Linux user:     ${user}
 Linux password: ${sys_pass}
 
@@ -638,23 +491,18 @@ CREDS
   read -rp "Issue and configure Let's Encrypt SSL now for ${domain}? [y/N]: " do_ssl
   if [[ "${do_ssl,,}" == "y" ]]; then
     install_certbot
-    # Build domain list: always apex; include www if DNS exists
     local cert_domains=("-d" "${domain}")
     if has_dns_record "www.${domain}"; then
       cert_domains+=("-d" "www.${domain}")
     else
       warn "No DNS record detected for www.${domain}; skipping it."
     fi
-    # Ensure firewall permits HTTP/HTTPS (already allowed earlier, but reconfirm)
-    ufw allow 'Nginx Full' >/dev/null 2>&1 || true
-    # Run certbot non-interactively with provided admin email
-    if certbot --nginx "${cert_domains[@]}" --redirect --agree-tos -m "${email}" -n; then
-      log "Let's Encrypt certificate installed and Nginx configured for HTTPS."
-      # Harden SSL vhost to ensure PHP handling and security snippets
-      ensure_ssl_vhost_rules "${domain}" "${web_dir}" "${aw_dir}" || true
-      systemctl reload nginx || true
+    ufw allow 'Apache Full' >/dev/null 2>&1 || true
+    if certbot --apache "${cert_domains[@]}" --redirect --agree-tos -m "${email}" -n; then
+      log "Let's Encrypt certificate installed and Apache configured for HTTPS."
+      systemctl reload apache2 || true
     else
-      warn "Certbot failed. Verify DNS for all domains and rerun: certbot --nginx -d ${domain} [-d www.${domain}] --redirect"
+      warn "Certbot failed. Verify DNS for all domains and rerun: certbot --apache -d ${domain} [-d www.${domain}] --redirect"
     fi
   fi
 }
@@ -666,12 +514,7 @@ setup_stack_only() {
   configure_ufw
   configure_unattended_upgrades
   install_wp_cli
-  nginx_global_hardening
-  # Prepare generic PHP-FPM socket symlink if possible
-  if detect_php_fpm; then
-    systemctl is-active --quiet "$PHP_FPM_SERVICE" || systemctl start "$PHP_FPM_SERVICE" || true
-    ensure_php_socket_symlink || true
-  fi
+  apache_global_hardening
   setup_ssh_access
   log "Base stack installed. You can now add a site."
 }
@@ -680,10 +523,10 @@ main_menu() {
   clear
   echo ""
   echo "============================================"
-  echo "WordPress LEMP Provisioner (Ubuntu 24.04) v${VERSION}"
+  echo "WordPress LAMP Provisioner (Ubuntu 24.04, Apache) v${VERSION}"
   echo "============================================"
-  echo "1) Install/Update Base LEMP Stack"
-  echo "2) Create New WordPress Site"
+  echo "1) Install/Update Base LAMP Stack (Apache)"
+  echo "2) Create New WordPress Site (Apache)"
   echo "3) Exit"
   read -rp "Choose an option [1-3]: " choice
   case "$choice" in
@@ -693,7 +536,6 @@ main_menu() {
       ;;
     2)
       ensure_ubuntu_2404
-      # Ensure stack pieces exist before site creation (do not reinstall stack)
       ensure_site_prereqs
       create_site
       ;;

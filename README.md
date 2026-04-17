@@ -14,6 +14,7 @@ What you get
 
 Files
 - wp-stack-ubuntu24.sh – main script with interactive menu
+- wp-stack-ubuntu24-apache.sh – Apache (LAMP) variant with the same features
 - lemp-wp-backup.sh, lamp-wp-backup.sh – legacy scripts (kept for reference)
 
 Requirements
@@ -22,13 +23,13 @@ Requirements
 
 Quick start
 1) Base stack install/update
-	 - Run: sudo bash wp-stack-ubuntu24.sh
-	 - Choose: 1) Install/Update Base LEMP Stack
+	- Nginx: sudo bash wp-stack-ubuntu24.sh → 1) Install/Update Base LEMP Stack
+	- Apache: sudo bash wp-stack-ubuntu24-apache.sh → 1) Install/Update Base LAMP Stack (Apache)
 	- Optionally: вставьте SSH-публичный ключ для root и отключите парольную аутентификацию
 
 2) Create a new WordPress site
-	 - Run: sudo bash wp-stack-ubuntu24.sh
-	 - Choose: 2) Create New WordPress Site
+	- Nginx: sudo bash wp-stack-ubuntu24.sh → 2) Create New WordPress Site
+	- Apache: sudo bash wp-stack-ubuntu24-apache.sh → 2) Create New WordPress Site (Apache)
 	- Provide: domain (example.com), Linux username, admin email, site title
 	 - Optionally: comma-separated plugin slugs (e.g. redis-cache,wordpress-seo,contact-form-7) and a theme slug (e.g. astra)
 	- Примечание: на этом шаге скрипт НЕ переустанавливает LEMP-стек. Он только проверяет, что службы запущены, и при необходимости установит WP-CLI.
@@ -84,6 +85,21 @@ Tips
 - Plugin/theme slugs are the same as on wordpress.org (e.g., contact-form-7, classic-editor, astra)
 - If Redis is desired, include the redis-cache plugin slug; it is auto-enabled if present
 - Linux username: допускаются только латинские буквы, цифры и подчёркивание; имя автоматически нормализуется к нижнему регистру и не может начинаться с цифры.
+
+Troubleshooting
+- 413 Request Entity Too Large при загрузке плагина/темы:
+	- В nginx для новых сайтов лимит уже выставлен (client_max_body_size 128M) в vhost-конфиге.
+	- Скрипт также ставит глобальный лимит client_max_body_size 128M (conf.d/uploads.conf), что покрывает HTTP и HTTPS (включая серверные блоки Certbot).
+	- Если меняли конфиги вручную, убедитесь, что нигде не переопределён меньший лимит.
+	- Убедитесь, что в PHP (php.ini FPM) upload_max_filesize и post_max_size >= размеру архива (скрипт настраивает по 128M).
+	- Перезагрузите nginx и php-fpm: systemctl reload nginx && systemctl restart php*-fpm
+
+- 405 Not Allowed при обновлении/установке через админку:
+	- Исправлено в сниппете wp-protect.conf: admin-ajax.php направляется в PHP-FPM. Перезагрузите nginx.
+
+- Ошибки БД для плагина Redirection (например, отсутствуют таблицы wp_redirection_*):
+	- Часто решается переактивацией: wp plugin deactivate redirection && wp plugin activate redirection
+	- Затем в админке пройдите Tools → Redirection и завершите установку/миграцию БД (кнопка Finish setup/Upgrade).
 
 Uninstall/cleanup (manual)
 - Remove site vhost: /etc/nginx/sites-enabled/<domain>.conf and reload Nginx
