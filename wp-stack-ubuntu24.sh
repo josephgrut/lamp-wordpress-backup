@@ -190,6 +190,21 @@ install_wp_cli() {
   fi
 }
 
+install_certbot() {
+  if ! command -v certbot >/dev/null 2>&1; then
+    log "Installing Certbot (Let's Encrypt) for Nginx..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y certbot python3-certbot-nginx
+  fi
+}
+
+has_dns_record() {
+  # Returns 0 if any A/AAAA record resolves via glibc (DNS), else 1
+  local name="$1"
+  getent ahosts "$name" >/dev/null 2>&1
+}
+
 ensure_site_prereqs() {
   log "Checking prerequisites for site creation..."
   # Ensure core services exist and are running
@@ -557,6 +572,29 @@ CREDS
   echo "----------------------------------------------"
   cat "$summary"
   echo "=============================================="; echo ""
+
+  # Offer to set up HTTPS with Let's Encrypt
+  echo ""
+  read -rp "Issue and configure Let's Encrypt SSL now for ${domain}? [y/N]: " do_ssl
+  if [[ "${do_ssl,,}" == "y" ]]; then
+    install_certbot
+    # Build domain list: always apex; include www if DNS exists
+    local cert_domains=("-d" "${domain}")
+    if has_dns_record "www.${domain}"; then
+      cert_domains+=("-d" "www.${domain}")
+    else
+      warn "No DNS record detected for www.${domain}; skipping it."
+    fi
+    # Ensure firewall permits HTTP/HTTPS (already allowed earlier, but reconfirm)
+    ufw allow 'Nginx Full' >/dev/null 2>&1 || true
+    # Run certbot non-interactively with provided admin email
+    if certbot --nginx "${cert_domains[@]}" --redirect --agree-tos -m "${email}" -n; then
+      log "Let's Encrypt certificate installed and Nginx configured for HTTPS."
+      systemctl reload nginx || true
+    else
+      warn "Certbot failed. Verify DNS for all domains and rerun: certbot --nginx -d ${domain} [-d www.${domain}] --redirect"
+    fi
+  fi
 }
 
 setup_stack_only() {

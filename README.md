@@ -9,6 +9,7 @@ What you get
 - WordPress: Latest core via WP-CLI, auto-updates enabled, optional plugins and theme installation
 - Backups: Daily database/files backup with rotation
 - Traffic analytics: AWStats with hourly updates and daily static HTML reports (protected by HTTP Basic Auth)
+- HTTPS: Опциональная автоматическая выдача и настройка сертификатов Let's Encrypt (certbot --nginx, с редиректом на HTTPS)
 - Credentials: All generated credentials are shown at the end and saved under /root/wp-stack-credentials-<domain>.txt
 
 Files
@@ -31,6 +32,7 @@ Quick start
 	- Provide: domain (example.com), Linux username, admin email, site title
 	 - Optionally: comma-separated plugin slugs (e.g. redis-cache,wordpress-seo,contact-form-7) and a theme slug (e.g. astra)
 	- Примечание: на этом шаге скрипт НЕ переустанавливает LEMP-стек. Он только проверяет, что службы запущены, и при необходимости установит WP-CLI.
+	- После создания сайта скрипт предложит автоматически выпустить SSL-сертификат (Let's Encrypt). Для включения www.<domain> автоматически проверяется наличие DNS‑записи, иначе www будет пропущен.
 
 Outputs
 - All credentials and important paths are printed at the end and saved to: /root/wp-stack-credentials-<domain>.txt
@@ -76,6 +78,7 @@ Security notes
 - Fail2ban enabled for SSH and a basic nginx-4xx jail for repeated 403/404
 - For HTTPS, set up TLS (e.g., with Certbot) after DNS points to the server
  - SSH: скрипт может установить SSH-ключ для root и (по желанию) отключить вход по паролю; после отключения входите по ключу
+ - Для успешного выпускa сертификатов Let's Encrypt домен(ы) должны указывать на IP сервера (DNS A/AAAA записи), а прокси (например, Cloudflare) — по возможности отключён на время выдачи (или используйте DNS‑челлендж вручную)
 
 Tips
 - Plugin/theme slugs are the same as on wordpress.org (e.g., contact-form-7, classic-editor, astra)
