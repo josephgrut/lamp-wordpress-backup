@@ -53,6 +53,7 @@ Features in detail
 - MySQL (local)
 	- Basic hardening (remove test DB, empty users, restrict root to localhost)
 	- Per-site DB/user with random strong password
+	- Поддержка MySQL/MariaDB (службы mysql/mariadb/mysqld)
 
 - WordPress via WP-CLI
 	- Latest core download, config with salts, secure defaults

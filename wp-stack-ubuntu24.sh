@@ -165,17 +165,32 @@ ensure_site_prereqs() {
     exit 1
   fi
 
-  if systemctl list-unit-files | grep -q '^mysql\.service'; then
-    systemctl is-active --quiet mysql || systemctl start mysql || true
-  else
-    err "MySQL not found. Please run 'Install/Update Base LEMP Stack' first."
+  # Detect MySQL/MariaDB service name robustly
+  local db_service=""
+  for svc in mysql mariadb mysqld; do
+    if systemctl list-unit-files | awk '{print $1}' | grep -qx "${svc}.service"; then
+      db_service="$svc"; break
+    fi
+  done
+  if [[ -z "$db_service" ]]; then
+    # Fallback: if mysql client exists, try starting common service names
+    if command -v mysql >/dev/null 2>&1; then
+      for svc in mysql mariadb mysqld; do systemctl start "$svc" 2>/dev/null && db_service="$svc" && break; done
+    fi
+  fi
+  if [[ -z "$db_service" ]]; then
+    err "MySQL/MariaDB service not found. Please run 'Install/Update Base LEMP Stack' first."
     exit 1
+  else
+    systemctl is-active --quiet "$db_service" || systemctl start "$db_service" || true
   fi
 
-  if systemctl list-unit-files | grep -q '^php8\.3-fpm\.service'; then
-    systemctl is-active --quiet php8.3-fpm || systemctl start php8.3-fpm || true
+  # PHP-FPM 8.3 service check
+  local fpm_service="php8.3-fpm"
+  if systemctl list-unit-files | awk '{print $1}' | grep -qx "${fpm_service}.service"; then
+    systemctl is-active --quiet "$fpm_service" || systemctl start "$fpm_service" || true
   else
-    err "PHP 8.3 FPM not found. Please run 'Install/Update Base LEMP Stack' first."
+    err "PHP 8.3 FPM service not found. Please run 'Install/Update Base LEMP Stack' first."
     exit 1
   fi
 
