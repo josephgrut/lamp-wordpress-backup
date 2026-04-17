@@ -28,12 +28,14 @@ Quick start
 2) Create a new WordPress site
 	 - Run: sudo bash wp-stack-ubuntu24.sh
 	 - Choose: 2) Create New WordPress Site
-	 - Provide: domain (example.com), Linux username, admin email, site title
+	- Provide: domain (example.com), Linux username, admin email, site title
 	 - Optionally: comma-separated plugin slugs (e.g. redis-cache,wordpress-seo,contact-form-7) and a theme slug (e.g. astra)
+	- Примечание: на этом шаге скрипт НЕ переустанавливает LEMP-стек. Он только проверяет, что службы запущены, и при необходимости установит WP-CLI.
 
 Outputs
 - All credentials and important paths are printed at the end and saved to: /root/wp-stack-credentials-<domain>.txt
 - Includes Linux user, database credentials, WP admin login, backup location, and AWStats access (URL + basic-auth).
+ - Сводка с логинами/паролями также печатается в консоль после завершения создания сайта.
 
 Features in detail
 - Nginx
@@ -76,6 +78,7 @@ Security notes
 Tips
 - Plugin/theme slugs are the same as on wordpress.org (e.g., contact-form-7, classic-editor, astra)
 - If Redis is desired, include the redis-cache plugin slug; it is auto-enabled if present
+- Linux username: допускаются только латинские буквы, цифры и подчёркивание; имя автоматически нормализуется к нижнему регистру и не может начинаться с цифры.
 
 Uninstall/cleanup (manual)
 - Remove site vhost: /etc/nginx/sites-enabled/<domain>.conf and reload Nginx

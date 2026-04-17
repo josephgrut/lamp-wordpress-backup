@@ -20,9 +20,22 @@ log() { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
 err()  { echo -e "[x] $*" >&2; }
 
+# Basic error trap to surface failing step
+trap 'err "Error on line $LINENO: $BASH_COMMAND"' ERR
+
 random_password() {
   # 24-char mixed password
   tr -dc 'A-Za-z0-9!@#%^*_+-=' </dev/urandom | head -c 24
+}
+
+# Normalize and validate a Linux username: lowercase, [a-z0-9_], start with a letter, max 31 chars
+normalize_linux_username() {
+  local in="$1"
+  local out
+  out=$(echo -n "$in" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_')
+  out=$(echo -n "$out" | sed -E 's/^[^a-z]+//')
+  out=${out:0:31}
+  echo -n "$out"
 }
 
 require_cmd() {
@@ -142,6 +155,36 @@ install_wp_cli() {
   fi
 }
 
+ensure_site_prereqs() {
+  log "Checking prerequisites for site creation..."
+  # Ensure core services exist and are running
+  if command -v nginx >/dev/null 2>&1; then
+    systemctl is-active --quiet nginx || systemctl start nginx || true
+  else
+    err "Nginx not found. Please run 'Install/Update Base LEMP Stack' first."
+    exit 1
+  fi
+
+  if systemctl list-unit-files | grep -q '^mysql\.service'; then
+    systemctl is-active --quiet mysql || systemctl start mysql || true
+  else
+    err "MySQL not found. Please run 'Install/Update Base LEMP Stack' first."
+    exit 1
+  fi
+
+  if systemctl list-unit-files | grep -q '^php8\.3-fpm\.service'; then
+    systemctl is-active --quiet php8.3-fpm || systemctl start php8.3-fpm || true
+  else
+    err "PHP 8.3 FPM not found. Please run 'Install/Update Base LEMP Stack' first."
+    exit 1
+  fi
+
+  install_wp_cli
+
+  # Ensure global hardening applied at least once
+  [[ -f /etc/nginx/conf.d/limits.conf ]] || nginx_global_hardening
+}
+
 nginx_global_hardening() {
   log "Configuring Nginx global hardening & rate limits..."
   # Global http context config
@@ -183,7 +226,7 @@ NGX
 create_site() {
   local domain user email title plugins theme
   echo "Enter primary domain (example.com):"; read -r domain
-  echo "Enter Linux username to own the site (no spaces):"; read -r user
+  echo "Enter Linux username to own the site (letters, digits, underscore):"; read -r user
   echo "Admin email (WordPress):"; read -r email
   echo "Site title:"; read -r title
   echo "Comma-separated plugin slugs to install (e.g. redis-cache,wordpress-seo,contact-form-7):"; read -r plugins
@@ -192,6 +235,21 @@ create_site() {
   if [[ -z "$domain" || -z "$user" || -z "$email" || -z "$title" ]]; then
     err "Domain, user, email, and site title are required."
     exit 1
+  fi
+
+  # Sanitize and validate Linux username
+  local user_raw="$user"
+  user=$(normalize_linux_username "$user_raw")
+  if [[ -z "$user" ]]; then
+    err "Provided username '$user_raw' is invalid after normalization. Use letters, digits or underscore, starting with a letter."
+    exit 1
+  fi
+  if [[ "$user" == "root" ]]; then
+    err "Username 'root' is not allowed. Choose another."
+    exit 1
+  fi
+  if [[ "$user" != "$user_raw" ]]; then
+    warn "Username normalized to '$user' from '$user_raw'."
   fi
 
   local db_name db_user db_pass sys_pass admin_user admin_pass root_dir web_dir log_dir backup_dir aw_dir
@@ -208,9 +266,11 @@ create_site() {
   backup_dir="${root_dir}/backups"
 
   log "Creating system user and directories..."
+  # Ensure target home path exists prior to adduser (nested path)
+  mkdir -p "$web_dir" "$log_dir"
   id -u "$user" >/dev/null 2>&1 || adduser --quiet --disabled-password --gecos "" --home "$web_dir" "$user"
   echo "$user:$sys_pass" | chpasswd
-  mkdir -p "$web_dir" "$backup_dir" "$log_dir"
+  mkdir -p "$backup_dir"
   chown -R "$user":www-data "/var/www/${user}"
   chmod -R 775 "/var/www/${user}"
 
@@ -439,6 +499,10 @@ CREDS
 
   echo ""; echo "=============================================="
   echo "Setup complete for ${domain}. Credentials saved to: ${summary}"
+  echo "----------------------------------------------"
+  echo "Credentials summary:"
+  echo "----------------------------------------------"
+  cat "$summary"
   echo "=============================================="; echo ""
 }
 
@@ -471,11 +535,8 @@ main_menu() {
       ;;
     2)
       ensure_ubuntu_2404
-      # Ensure stack pieces exist before site creation
-      apt_install_base
-      configure_php
-      install_wp_cli
-      nginx_global_hardening
+      # Ensure stack pieces exist before site creation (do not reinstall stack)
+      ensure_site_prereqs
       create_site
       ;;
     *)
