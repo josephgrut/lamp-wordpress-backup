@@ -49,6 +49,7 @@ Features in detail
 - PHP 8.3 tuning
 	- memory_limit=256M, upload_max_filesize/post_max_size=128M, max_execution_time=300
 	- opcache enabled and sized for production
+	- Nginx использует универсальный сокет /run/php/php-fpm.sock (скрипт создаёт symlink к актуальной версии PHP-FPM)
 
 - MySQL (local)
 	- Basic hardening (remove test DB, empty users, restrict root to localhost)

@@ -43,6 +43,41 @@ require_cmd() {
 }
 
 ensure_ubuntu_2404() {
+
+  # Detect installed PHP-FPM service (prefers highest version) and set globals
+  PHP_FPM_SERVICE=""
+  PHP_FPM_SOCK=""
+  detect_php_fpm() {
+    local services
+    services=$(systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -E '^php[0-9]+\.[0-9]+-fpm\.service$' | sort -V)
+    if [[ -z "$services" ]]; then
+      if systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | grep -qx 'php-fpm.service'; then
+        PHP_FPM_SERVICE="php-fpm"
+        PHP_FPM_SOCK="/run/php/php-fpm.sock"
+        return 0
+      fi
+      return 1
+    fi
+    PHP_FPM_SERVICE=$(echo "$services" | tail -n1 | sed 's/\.service$//')
+    PHP_FPM_SOCK="/run/php/${PHP_FPM_SERVICE}.sock"
+    return 0
+  }
+
+  ensure_php_socket_symlink() {
+    [[ -z "$PHP_FPM_SERVICE" ]] && detect_php_fpm || true
+    local actual_sock="/run/php/${PHP_FPM_SERVICE}.sock"
+    local generic_sock="/run/php/php-fpm.sock"
+    # Wait briefly for socket to appear
+    for i in {1..10}; do
+      [[ -S "$actual_sock" ]] && break || sleep 0.5
+    done
+    if [[ -S "$actual_sock" ]]; then
+      mkdir -p /run/php
+      ln -snf "$actual_sock" "$generic_sock"
+      return 0
+    fi
+    return 1
+  }
   . /etc/os-release
   if [[ "${ID}" != "ubuntu" ]]; then
     err "This script supports Ubuntu only. Detected: ${ID}"
@@ -185,12 +220,12 @@ ensure_site_prereqs() {
     systemctl is-active --quiet "$db_service" || systemctl start "$db_service" || true
   fi
 
-  # PHP-FPM 8.3 service check
-  local fpm_service="php8.3-fpm"
-  if systemctl list-unit-files | awk '{print $1}' | grep -qx "${fpm_service}.service"; then
-    systemctl is-active --quiet "$fpm_service" || systemctl start "$fpm_service" || true
+  # PHP-FPM service check (any supported version) and ensure generic socket symlink
+  if detect_php_fpm; then
+    systemctl is-active --quiet "$PHP_FPM_SERVICE" || systemctl start "$PHP_FPM_SERVICE" || true
+    ensure_php_socket_symlink || warn "Could not create generic php-fpm socket symlink; ensure nginx uses correct socket."
   else
-    err "PHP 8.3 FPM service not found. Please run 'Install/Update Base LEMP Stack' first."
+    err "PHP-FPM service not found. Please run 'Install/Update Base LEMP Stack' first."
     exit 1
   fi
 
@@ -231,7 +266,7 @@ location = /xmlrpc.php { deny all; }
 location ~* /(?:uploads|files)/.*\.php$ { deny all; }
 
 # Tighten login/heartbeat rate limits
-location = /wp-login.php { limit_req zone=wp burst=20 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:/run/php/php8.3-fpm.sock; }
+location = /wp-login.php { limit_req zone=wp burst=20 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:/run/php/php-fpm.sock; }
 location ~* /wp-admin/admin-ajax\.php$ { limit_req zone=wp burst=60 nodelay; }
 NGX
 
@@ -310,7 +345,7 @@ server {
 
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+      fastcgi_pass unix:/run/php/php-fpm.sock;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         include fastcgi_params;
     }
@@ -529,6 +564,11 @@ setup_stack_only() {
   configure_unattended_upgrades
   install_wp_cli
   nginx_global_hardening
+  # Prepare generic PHP-FPM socket symlink if possible
+  if detect_php_fpm; then
+    systemctl is-active --quiet "$PHP_FPM_SERVICE" || systemctl start "$PHP_FPM_SERVICE" || true
+    ensure_php_socket_symlink || true
+  fi
   setup_ssh_access
   log "Base stack installed. You can now add a site."
 }
