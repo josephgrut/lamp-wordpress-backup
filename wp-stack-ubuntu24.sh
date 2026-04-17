@@ -380,8 +380,11 @@ SQL
   log "Installing WordPress (latest) via WP-CLI..."
   install_wp_cli
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp core download --force"
-  sudo -u "$user" -H bash -c "cd '$web_dir' && wp config create --dbname='${db_name}' --dbuser='${db_user}' --dbpass='${db_pass}' --dbhost='localhost' --dbprefix='wp_' --skip-check"
-  sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set FS_METHOD direct --type=constant --raw"
+  if [[ ! -f "${web_dir}/wp-config.php" ]]; then
+    sudo -u "$user" -H bash -c "cd '$web_dir' && wp config create --dbname='${db_name}' --dbuser='${db_user}' --dbpass='${db_pass}' --dbhost='localhost' --dbprefix='wp_' --skip-check"
+  fi
+  # Ensure required constants (strings quoted, booleans raw)
+  sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set FS_METHOD direct --type=constant"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set WP_AUTO_UPDATE_CORE true --type=constant --raw"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set DISALLOW_FILE_EDIT true --type=constant --raw"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp config set WP_MEMORY_LIMIT 256M --type=constant"
