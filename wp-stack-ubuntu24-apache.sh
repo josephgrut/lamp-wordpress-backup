@@ -266,7 +266,7 @@ ensure_site_prereqs() {
     exit 1
   fi
 
-  if ! systemctl list-unit-files --type=service --all | grep -qE '^apache2\.service'; then
+  if ! systemctl list-unit-files --type=service --all | awk '{print $1}' | grep -qx 'apache2.service'; then
     err "Apache2 systemd unit not found. Please run 'Install/Update Base LAMP Stack' first."
     exit 1
   fi
