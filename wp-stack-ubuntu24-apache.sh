@@ -250,7 +250,11 @@ apache_global_hardening() {
   Header always set X-XSS-Protection "1; mode=block"
 </IfModule>
 APC
+  cat >/etc/apache2/conf-available/servername.conf <<'APC'
+ServerName localhost
+APC
   a2enconf security-headers >/dev/null 2>&1 || true
+  a2enconf servername >/dev/null 2>&1 || true
   systemctl reload apache2 || systemctl restart apache2
 }
 
