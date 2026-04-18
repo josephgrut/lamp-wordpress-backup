@@ -50,6 +50,8 @@ apt_install_base() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get upgrade -y
+  # Preseed Postfix to operate in 'Local only' mode (provides /usr/sbin/sendmail)
+  echo "postfix postfix/main_mailer_type string 'Local only'" | debconf-set-selections || true
   apt-get install -y \
     software-properties-common apt-transport-https ca-certificates \
     curl wget unzip zip git htop mc nano jq pwgen whois \
@@ -65,6 +67,8 @@ apt_install_base() {
   systemctl enable --now apache2
   systemctl enable --now mysql
   systemctl enable --now redis-server
+  # Ensure postfix (MTA) is enabled to provide sendmail compatibility
+  systemctl enable --now postfix >/dev/null 2>&1 || true
 }
 
 secure_mysql_if_needed() {
@@ -469,6 +473,24 @@ SQL
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp option update uploads_use_yearmonth_folders 0"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp rewrite structure '/%category%/%postname%'"
   sudo -u "$user" -H bash -c "cd '$web_dir' && wp rewrite flush --hard"
+
+  # Ensure .htaccess exists with WordPress rewrite rules so pretty permalinks work
+  if [[ ! -f "$web_dir/.htaccess" ]]; then
+    cat >"$web_dir/.htaccess" <<'HT'
+# BEGIN WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule . /index.php [L]
+</IfModule>
+# END WordPress
+HT
+    chown "$user":www-data "$web_dir/.htaccess"
+    chmod 644 "$web_dir/.htaccess"
+  fi
 
   # Permissions
   mkdir -p "$web_dir/wp-content/uploads"
