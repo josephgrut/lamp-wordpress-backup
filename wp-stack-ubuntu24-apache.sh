@@ -362,7 +362,8 @@ create_site() {
     # ACME challenge alias (Let's Encrypt)
     Alias /.well-known/acme-challenge/ ${web_dir}/.well-known/acme-challenge/
     <Directory ${web_dir}/.well-known/acme-challenge/>
-      Options None
+      # Allow FollowSymLinks so webroot ACME challenges and rewrite rules work
+      Options -Indexes +FollowSymLinks
       AllowOverride None
       ForceType text/plain
       Require all granted
