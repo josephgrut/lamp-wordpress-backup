@@ -2,11 +2,12 @@
 set -Eeuo pipefail
 
 # WordPress LAMP Auto-Provisioner for Ubuntu 24.04 (Apache)
-# Version: 1.0.0
+# Version: 1.1.0
 # Author: Your Team
 # License: MIT
 
 # Changelog
+# 1.1.0 - Added existing-domain SSL management and WordPress multisite subdomain support
 # 1.0.0 - Initial Apache-based release (LAMP, WP-CLI, AWStats static, backups, bot protection, optional SSL)
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -14,7 +15,7 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   exit 1
 fi
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 log()  { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
@@ -163,20 +164,303 @@ has_dns_record() {
   getent ahosts "$name" >/dev/null 2>&1
 }
 
+normalize_hostname() {
+  echo -n "$1" | tr 'A-Z' 'a-z' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/\.$//'
+}
+
+is_valid_hostname() {
+  local host="$1"
+  [[ "$host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]
+}
+
+is_valid_subdomain_label() {
+  local label="$1"
+  [[ "$label" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
+}
+
+hostname_from_url() {
+  local url="$1"
+  url="${url#*://}"
+  url="${url%%/*}"
+  url="${url%%:*}"
+  echo -n "$url"
+}
+
+get_parent_candidate() {
+  local hostname="$1"
+  echo -n "${hostname#*.}"
+}
+
+apache_get_first_directive() {
+  local conf="$1"
+  local directive="$2"
+  awk -v d="$directive" 'tolower($1) == tolower(d) { print $2; exit }' "$conf"
+}
+
+apache_conf_has_wildcard_alias() {
+  local conf="$1"
+  local domain="$2"
+  awk -v alias="*.${domain}" 'tolower($1)=="serveralias"{for(i=2;i<=NF;i++) if($i==alias) found=1} END{exit(found?0:1)}' "$conf"
+}
+
+ensure_server_alias() {
+  local conf="$1"
+  local alias="$2"
+  if awk -v alias="$alias" 'tolower($1)=="serveralias"{for(i=2;i<=NF;i++) if($i==alias) found=1} END{exit(found?0:1)}' "$conf"; then
+    return 0
+  fi
+  if grep -Eq '^[[:space:]]*ServerAlias[[:space:]]' "$conf"; then
+    sed -i -E "0,/^[[:space:]]*ServerAlias[[:space:]]/ s|\$| ${alias}|" "$conf"
+  else
+    sed -i -E "/^[[:space:]]*ServerName[[:space:]]/a\\    ServerAlias ${alias}" "$conf"
+  fi
+}
+
+ensure_multisite_server_alias() {
+  local conf="$1"
+  local domain="$2"
+  if apache_conf_has_wildcard_alias "$conf" "$domain"; then
+    return 0
+  fi
+  ensure_server_alias "$conf" "*.${domain}"
+  apache2ctl configtest
+  systemctl reload apache2
+}
+
+ensure_awstats_location_block() {
+  local conf="$1"
+  local aw_dir="$2"
+  if grep -q '/awstats' "$conf"; then
+    return 0
+  fi
+
+  local tmpconf
+  tmpconf=$(mktemp)
+  grep -v '</VirtualHost>' "$conf" > "$tmpconf"
+  cat >>"$tmpconf" <<APV
+
+    <Location "/awstats">
+        AuthType Basic
+        AuthName "Restricted"
+        AuthUserFile ${aw_dir}/.htpasswd
+        Require valid-user
+    </Location>
+    Alias /awstats ${aw_dir}/
+    <Directory ${aw_dir}>
+        Require all granted
+        Options Indexes FollowSymLinks
+        AllowOverride None
+    </Directory>
+</VirtualHost>
+APV
+  mv "$tmpconf" "$conf"
+  apache2ctl configtest
+  systemctl reload apache2
+}
+
+get_site_owner_from_path() {
+  local path="$1"
+  stat -c '%U' "$path"
+}
+
+wp_run() {
+  local owner="$1"
+  shift
+  sudo -u "$owner" -H wp "$@"
+}
+
+wp_capture() {
+  local owner="$1"
+  shift
+  sudo -u "$owner" -H wp "$@" 2>/dev/null
+}
+
+wordpress_is_installed() {
+  local web_dir="$1"
+  local owner="$2"
+  wp_run "$owner" --path="$web_dir" core is-installed >/dev/null 2>&1
+}
+
+wordpress_is_multisite() {
+  local web_dir="$1"
+  local owner="$2"
+  wp_run "$owner" --path="$web_dir" core is-installed --network >/dev/null 2>&1
+}
+
+get_wordpress_admin_email() {
+  local web_dir="$1"
+  local owner="$2"
+  local url="$3"
+  wp_capture "$owner" --path="$web_dir" --url="$url" option get admin_email | head -n1
+}
+
+get_wordpress_home_url() {
+  local web_dir="$1"
+  local owner="$2"
+  local url="$3"
+  local value
+  value=$(wp_capture "$owner" --path="$web_dir" --url="$url" option get home | head -n1 || true)
+  if [[ -z "$value" ]]; then
+    if [[ "$url" == http://* || "$url" == https://* ]]; then
+      echo -n "$url"
+    else
+      echo -n "http://${url}"
+    fi
+  else
+    echo -n "$value"
+  fi
+}
+
+get_wordpress_blogname() {
+  local web_dir="$1"
+  local owner="$2"
+  local url="$3"
+  local value
+  value=$(wp_capture "$owner" --path="$web_dir" --url="$url" option get blogname | head -n1 || true)
+  if [[ -z "$value" ]]; then
+    echo -n "$url"
+  else
+    echo -n "$value"
+  fi
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local answer
+  read -rp "${prompt} [y/N]: " answer
+  [[ "${answer,,}" == "y" ]]
+}
+
+declare -ga INVENTORY_HOSTS=()
+declare -ga INVENTORY_CONFS=()
+declare -ga INVENTORY_DOCROOTS=()
+declare -ga INVENTORY_KINDS=()
+declare -gA INVENTORY_SEEN=()
+
+add_inventory_entry() {
+  local host="$1"
+  local conf="$2"
+  local docroot="$3"
+  local kind="$4"
+  [[ -z "$host" || -z "$conf" || -z "$docroot" ]] && return 0
+  [[ -n "${INVENTORY_SEEN[$host]:-}" ]] && return 0
+  INVENTORY_HOSTS+=("$host")
+  INVENTORY_CONFS+=("$conf")
+  INVENTORY_DOCROOTS+=("$docroot")
+  INVENTORY_KINDS+=("$kind")
+  INVENTORY_SEEN["$host"]=1
+}
+
+build_existing_sites_inventory() {
+  INVENTORY_HOSTS=()
+  INVENTORY_CONFS=()
+  INVENTORY_DOCROOTS=()
+  INVENTORY_KINDS=()
+  INVENTORY_SEEN=()
+
+  local conf host docroot owner
+  shopt -s nullglob
+  for conf in /etc/apache2/sites-available/*.conf; do
+    [[ "$conf" == *-le-ssl.conf ]] && continue
+    grep -q '<VirtualHost \*:80>' "$conf" || continue
+    host=$(normalize_hostname "$(apache_get_first_directive "$conf" "ServerName")")
+    docroot=$(apache_get_first_directive "$conf" "DocumentRoot")
+    [[ -z "$host" || -z "$docroot" || "$host" == "localhost" ]] && continue
+
+    add_inventory_entry "$host" "$conf" "$docroot" "primary"
+
+    if [[ -f "${docroot}/wp-config.php" ]]; then
+      owner=$(get_site_owner_from_path "$docroot")
+      if wordpress_is_multisite "$docroot" "$owner"; then
+        while IFS= read -r site_url; do
+          local ms_host
+          ms_host=$(normalize_hostname "$(hostname_from_url "$site_url")")
+          [[ -n "$ms_host" ]] && add_inventory_entry "$ms_host" "$conf" "$docroot" "multisite"
+        done < <(wp_capture "$owner" --path="$docroot" site list --field=url || true)
+      fi
+    fi
+  done
+  shopt -u nullglob
+}
+
+select_inventory_entry() {
+  local mode="${1:-all}"
+  build_existing_sites_inventory
+
+  local -a filtered=()
+  local idx
+  for idx in "${!INVENTORY_HOSTS[@]}"; do
+    if [[ "$mode" == "primary" && "${INVENTORY_KINDS[$idx]}" != "primary" ]]; then
+      continue
+    fi
+    filtered+=("$idx")
+  done
+
+  if [[ ${#filtered[@]} -eq 0 ]]; then
+    err "No matching Apache sites were detected."
+    return 1
+  fi
+
+  echo ""
+  echo "Detected sites:"
+  local n=1 host kind conf
+  for idx in "${filtered[@]}"; do
+    host="${INVENTORY_HOSTS[$idx]}"
+    kind="${INVENTORY_KINDS[$idx]}"
+    conf="${INVENTORY_CONFS[$idx]}"
+    printf " %d) %s [%s] (%s)\n" "$n" "$host" "$kind" "$conf"
+    ((n++))
+  done
+
+  local choice selected_idx
+  read -rp "Choose a site [1-${#filtered[@]}]: " choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#filtered[@]} )); then
+    err "Invalid selection."
+    return 1
+  fi
+
+  selected_idx="${filtered[$((choice-1))]}"
+  SELECTED_HOST="${INVENTORY_HOSTS[$selected_idx]}"
+  SELECTED_CONF="${INVENTORY_CONFS[$selected_idx]}"
+  SELECTED_DOCROOT="${INVENTORY_DOCROOTS[$selected_idx]}"
+  SELECTED_KIND="${INVENTORY_KINDS[$selected_idx]}"
+  return 0
+}
+
+get_certbot_domains_for_host() {
+  local host="$1"
+  CERTBOT_NAMES=("$host")
+  local alias="www.${host}"
+  if has_dns_record "$alias"; then
+    CERTBOT_NAMES+=("$alias")
+  else
+    warn "No DNS record detected for ${alias}; skipping it."
+  fi
+}
+
 create_ssl_vhost() {
-  local domain="$1"
+  local hostname="$1"
   local web_dir="$2"
-  local conf="/etc/apache2/sites-available/${domain}-le-ssl.conf"
+  local log_dir="$3"
+  shift 3
+  local aliases=("$@")
+  local conf="/etc/apache2/sites-available/${hostname}-le-ssl.conf"
+
+  mkdir -p "$log_dir"
+
+  local alias_lines=""
+  local alias
+  for alias in "${aliases[@]}"; do
+    alias_lines+="    ServerAlias ${alias}"$'\n'
+  done
 
   cat >"$conf" <<APV
 <IfModule mod_ssl.c>
 <VirtualHost *:443>
-    ServerName ${domain}
-    ServerAlias www.${domain}
-    DocumentRoot ${web_dir}
-
-    ErrorLog /var/log/apache2/${domain}/error.log
-    CustomLog /var/log/apache2/${domain}/access.log combined
+    ServerName ${hostname}
+${alias_lines}    DocumentRoot ${web_dir}
+    ErrorLog ${log_dir}/error.log
+    CustomLog ${log_dir}/access.log combined
 
     <Directory ${web_dir}>
         AllowOverride All
@@ -191,9 +475,9 @@ create_ssl_vhost() {
     Header always set X-XSS-Protection "1; mode=block"
 
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/${domain}/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/${domain}/privkey.pem
-    SSLCertificateChainFile /etc/letsencrypt/live/${domain}/chain.pem
+    SSLCertificateFile /etc/letsencrypt/live/${hostname}/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/${hostname}/privkey.pem
+    SSLCertificateChainFile /etc/letsencrypt/live/${hostname}/chain.pem
 
     <FilesMatch "\.(css|js)$">
       Header set Cache-Control "public, max-age=31536000"
@@ -210,38 +494,211 @@ create_ssl_vhost() {
     </Files>
 
     RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/ [NC]
     RewriteCond %{HTTP_USER_AGENT} (ahrefs|semrush|mj12bot|dotbot|curl|wget|python-requests|axios|scrapy|libwww-perl) [NC]
     RewriteRule ^ - [F]
 </VirtualHost>
 </IfModule>
 APV
 
-  a2ensite "${domain}-le-ssl.conf" >/dev/null 2>&1 || true
+  a2ensite "${hostname}-le-ssl.conf" >/dev/null 2>&1 || true
   apache2ctl configtest && systemctl reload apache2
 }
 
 issue_ssl_certificate() {
-  local domain="$1"
+  local hostname="$1"
   local web_dir="$2"
   local email="$3"
   install_certbot
 
-  local cert_domains=("-w" "$web_dir" "-d" "$domain")
-  if has_dns_record "www.${domain}"; then
-    cert_domains+=("-d" "www.${domain}")
-  else
-    warn "No DNS record detected for www.${domain}; skipping it."
-  fi
+  get_certbot_domains_for_host "$hostname"
+  local cert_domains=("-w" "$web_dir")
+  local cert_name
+  for cert_name in "${CERTBOT_NAMES[@]}"; do
+    cert_domains+=("-d" "$cert_name")
+  done
+
+  LAST_SSL_NAMES_STR=$(IFS=', '; echo "${CERTBOT_NAMES[*]}")
+  LAST_SSL_STATUS="failed"
 
   ufw allow 'Apache Full' >/dev/null 2>&1 || true
   apache2ctl configtest && systemctl reload apache2 || true
 
   if certbot certonly --webroot "${cert_domains[@]}" --agree-tos -m "${email}" --deploy-hook "systemctl reload apache2" -n; then
-    log "Let's Encrypt certificate issued successfully for ${domain}."
-    create_ssl_vhost "$domain" "$web_dir"
+    LAST_SSL_STATUS="issued"
+    log "Let's Encrypt certificate issued successfully for ${hostname}: ${LAST_SSL_NAMES_STR}"
+    create_ssl_vhost "$hostname" "$web_dir" "/var/log/apache2/${hostname}" "${CERTBOT_NAMES[@]:1}"
   else
-    warn "Certbot webroot issuance failed. Please verify DNS and rerun: certbot certonly --webroot -w ${web_dir} -d ${domain} [-d www.${domain}]"
+    warn "Certbot webroot issuance failed. Please verify DNS and rerun: certbot certonly --webroot -w ${web_dir} -d ${hostname} [-d www.${hostname}]"
   fi
+}
+
+convert_to_multisite_if_needed() {
+  local hostname="$1"
+  local conf="$2"
+  local web_dir="$3"
+  local owner="$4"
+  local home_url="$5"
+
+  MULTISITE_CONVERTED="no"
+  if wordpress_is_multisite "$web_dir" "$owner"; then
+    return 0
+  fi
+
+  warn "The site ${hostname} is currently a single-site WordPress install."
+  if ! prompt_yes_no "Convert ${hostname} to WordPress Multisite now? This updates wp-config.php and .htaccess."; then
+    err "Multisite conversion was declined."
+    return 1
+  fi
+
+  local network_title
+  network_title=$(get_wordpress_blogname "$web_dir" "$owner" "$home_url")
+  cp -f "${web_dir}/wp-config.php" "${web_dir}/wp-config.php.bak.$(date +%Y%m%d%H%M%S)"
+  [[ -f "${web_dir}/.htaccess" ]] && cp -f "${web_dir}/.htaccess" "${web_dir}/.htaccess.bak.$(date +%Y%m%d%H%M%S)"
+
+  wp_run "$owner" --path="$web_dir" --url="$home_url" core multisite-convert --title="$network_title" --base=/ --subdomains
+
+  cat >"${web_dir}/.htaccess" <<'HT'
+# BEGIN WordPress Multisite
+RewriteEngine On
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+RewriteBase /
+RewriteRule ^index\.php$ - [L]
+
+# add a trailing slash to /wp-admin
+RewriteRule ^wp-admin$ wp-admin/ [R=301,L]
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+RewriteRule ^(wp-(content|admin|includes).*) $1 [L]
+RewriteRule ^(.*\.php)$ $1 [L]
+RewriteRule . index.php [L]
+# END WordPress Multisite
+HT
+  chown "$owner":www-data "${web_dir}/.htaccess"
+  chmod 644 "${web_dir}/.htaccess"
+
+  ensure_multisite_server_alias "$conf" "$hostname"
+  MULTISITE_CONVERTED="yes"
+  log "Converted ${hostname} to WordPress Multisite with subdomain routing."
+}
+
+manage_existing_ssl() {
+  local cert_email
+  if ! select_inventory_entry "all"; then
+    return 1
+  fi
+
+  if [[ ! -d "$SELECTED_DOCROOT" ]]; then
+    err "DocumentRoot not found for ${SELECTED_HOST}: ${SELECTED_DOCROOT}"
+    return 1
+  fi
+
+  local owner
+  owner=$(get_site_owner_from_path "$SELECTED_DOCROOT")
+  local default_email=""
+  if [[ -f "${SELECTED_DOCROOT}/wp-config.php" ]] && wordpress_is_installed "$SELECTED_DOCROOT" "$owner"; then
+    default_email=$(get_wordpress_admin_email "$SELECTED_DOCROOT" "$owner" "http://${SELECTED_HOST}")
+  fi
+
+  read -rp "Admin email for Let's Encrypt [${default_email:-required}]: " cert_email
+  cert_email="${cert_email:-$default_email}"
+  if [[ -z "$cert_email" ]]; then
+    err "Admin email is required for certificate issuance."
+    return 1
+  fi
+
+  issue_ssl_certificate "$SELECTED_HOST" "$SELECTED_DOCROOT" "$cert_email"
+}
+
+create_multisite_subdomain_site() {
+  if ! select_inventory_entry "primary"; then
+    return 1
+  fi
+
+  local parent_domain="$SELECTED_HOST"
+  local conf="$SELECTED_CONF"
+  local web_dir="$SELECTED_DOCROOT"
+
+  if [[ ! -f "${web_dir}/wp-config.php" ]]; then
+    err "${parent_domain} does not appear to contain a WordPress installation."
+    return 1
+  fi
+
+  local owner
+  owner=$(get_site_owner_from_path "$web_dir")
+  if ! wordpress_is_installed "$web_dir" "$owner"; then
+    err "WP-CLI could not confirm a WordPress install in ${web_dir}."
+    return 1
+  fi
+
+  local home_url
+  home_url=$(get_wordpress_home_url "$web_dir" "$owner" "http://${parent_domain}")
+  convert_to_multisite_if_needed "$parent_domain" "$conf" "$web_dir" "$owner" "$home_url"
+
+  local sub_label site_title site_email
+  read -rp "Enter new subdomain label (example: blog for blog.${parent_domain}): " sub_label
+  sub_label=$(normalize_hostname "$sub_label")
+  if ! is_valid_subdomain_label "$sub_label"; then
+    err "Invalid subdomain label. Use lowercase letters, digits and hyphens only."
+    return 1
+  fi
+
+  local hostname="${sub_label}.${parent_domain}"
+  local default_email
+  default_email=$(get_wordpress_admin_email "$web_dir" "$owner" "$home_url")
+  read -rp "Site title for ${hostname}: " site_title
+  read -rp "Admin email for ${hostname} [${default_email}]: " site_email
+  site_email="${site_email:-$default_email}"
+
+  if [[ -z "$site_title" || -z "$site_email" ]]; then
+    err "Site title and admin email are required."
+    return 1
+  fi
+
+  if ! has_dns_record "$hostname"; then
+    warn "DNS for ${hostname} was not detected. SSL issuance may fail until DNS points to this server."
+  fi
+
+  wp_run "$owner" --path="$web_dir" --url="$home_url" site create --slug="$sub_label" --title="$site_title" --email="$site_email"
+  issue_ssl_certificate "$hostname" "$web_dir" "$site_email"
+
+  local summary="/root/wp-stack-subdomain-${hostname}.txt"
+  cat >"$summary" <<CREDS
+WordPress LAMP Provisioner (Apache) v${VERSION} - Multisite subdomain ${hostname}
+==========================================================================
+Parent domain:           ${parent_domain}
+WordPress path:          ${web_dir}
+Linux owner:             ${owner}
+Multisite conversion:    ${MULTISITE_CONVERTED}
+New site URL:            https://${hostname}/
+SSL status:              ${LAST_SSL_STATUS}
+SSL SAN names:           ${LAST_SSL_NAMES_STR}
+CREDS
+
+  echo ""
+  echo "=============================================="
+  echo "Subdomain site created for ${hostname}. Summary saved to: ${summary}"
+  echo "----------------------------------------------"
+  cat "$summary"
+  echo "=============================================="
+}
+
+manage_existing_domains_menu() {
+  while true; do
+    echo ""
+    echo "Manage Existing Domains"
+    echo "1) Issue SSL for existing domain/subdomain"
+    echo "2) Create WordPress subdomain site"
+    echo "3) Back"
+    read -rp "Choose an option [1-3]: " manage_choice
+    case "$manage_choice" in
+      1) manage_existing_ssl ;;
+      2) create_multisite_subdomain_site ;;
+      3) return 0 ;;
+      *) warn "Invalid option. Please choose 1, 2 or 3." ;;
+    esac
+  done
 }
 
 apache_global_hardening() {
@@ -409,6 +866,7 @@ create_site() {
 
     # Basic bad bot blocking
     RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/ [NC]
     RewriteCond %{HTTP_USER_AGENT} (ahrefs|semrush|mj12bot|dotbot|curl|wget|python-requests|axios|scrapy|libwww-perl) [NC]
     RewriteRule ^ - [F]
 </VirtualHost>
@@ -536,24 +994,7 @@ ROB
   htpasswd -b -c "$aw_dir/.htpasswd" "$aw_user" "$aw_pass" >/dev/null 2>&1 || true
 
   # Serve static reports via /awstats with Basic Auth
-  if ! grep -q "/awstats" "/etc/apache2/sites-available/${domain}.conf"; then
-    cat >>"/etc/apache2/sites-available/${domain}.conf" <<APV
-
-    <Location "/awstats">
-        AuthType Basic
-        AuthName "Restricted"
-        AuthUserFile ${aw_dir}/.htpasswd
-        Require valid-user
-    </Location>
-    Alias /awstats ${aw_dir}/
-    <Directory ${aw_dir}>
-        Require all granted
-        Options Indexes FollowSymLinks
-        AllowOverride None
-    </Directory>
-APV
-    apache2ctl configtest && systemctl reload apache2
-  fi
+  ensure_awstats_location_block "/etc/apache2/sites-available/${domain}.conf" "$aw_dir"
 
   # Cron for AWStats updates and static HTML
   cat >"/etc/cron.d/awstats-${domain}" <<CRON
@@ -674,29 +1115,42 @@ setup_stack_only() {
 }
 
 main_menu() {
-  clear
-  echo ""
-  echo "============================================"
-  echo "WordPress LAMP Provisioner (Ubuntu 24.04, Apache) v${VERSION}"
-  echo "============================================"
-  echo "1) Install/Update Base LAMP Stack (Apache)"
-  echo "2) Create New WordPress Site (Apache)"
-  echo "3) Exit"
-  read -rp "Choose an option [1-3]: " choice
-  case "$choice" in
-    1)
-      ensure_ubuntu_2404
-      setup_stack_only
-      ;;
-    2)
-      ensure_ubuntu_2404
-      ensure_site_prereqs
-      create_site
-      ;;
-    *)
-      exit 0
-      ;;
-  esac
+  while true; do
+    clear
+    echo ""
+    echo "============================================"
+    echo "WordPress LAMP Provisioner (Ubuntu 24.04, Apache) v${VERSION}"
+    echo "============================================"
+    echo "1) Install/Update Base LAMP Stack (Apache)"
+    echo "2) Create New WordPress Site (Apache)"
+    echo "3) Manage existing domains"
+    echo "4) Exit"
+    read -rp "Choose an option [1-4]: " choice
+    case "$choice" in
+      1)
+        ensure_ubuntu_2404
+        setup_stack_only
+        ;;
+      2)
+        ensure_ubuntu_2404
+        ensure_site_prereqs
+        create_site
+        ;;
+      3)
+        ensure_ubuntu_2404
+        ensure_site_prereqs
+        manage_existing_domains_menu
+        ;;
+      4)
+        exit 0
+        ;;
+      *)
+        warn "Invalid option. Please choose 1, 2, 3 or 4."
+        ;;
+    esac
+    echo ""
+    read -rp "Press Enter to continue..." _
+  done
 }
 
 main_menu
