@@ -16,10 +16,12 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 
 VERSION="1.1.0"
+DEBUG_MODE="${DEBUG_MODE:-0}"
 
 log()  { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
 err()  { echo -e "[x] $*" >&2; }
+debug() { [[ "$DEBUG_MODE" == "1" ]] && echo -e "[debug] $*"; }
 trap 'err "Error on line $LINENO: $BASH_COMMAND"' ERR
 
 random_password() {
@@ -162,6 +164,27 @@ install_certbot() {
 has_dns_record() {
   local name="$1"
   getent ahosts "$name" >/dev/null 2>&1
+}
+
+systemd_unit_exists() {
+  local unit="$1"
+  local state
+  state=$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
+  debug "systemd unit check: unit=${unit} LoadState=${state:-<empty>}"
+  [[ -n "$state" && "$state" != "not-found" ]]
+}
+
+find_db_service_unit() {
+  local svc
+  for svc in mysql mariadb mysqld; do
+    if systemd_unit_exists "${svc}.service"; then
+      debug "database service detected: ${svc}.service"
+      echo -n "$svc"
+      return 0
+    fi
+  done
+  debug "database service detection failed for mysql/mariadb/mysqld"
+  return 1
 }
 
 normalize_hostname() {
@@ -721,27 +744,33 @@ APC
 
 ensure_site_prereqs() {
   log "Checking prerequisites for site creation..."
+  debug "DEBUG_MODE=${DEBUG_MODE}"
+  debug "apache2ctl path: $(command -v apache2ctl 2>/dev/null || echo '<missing>')"
+  debug "wp path: $(command -v wp 2>/dev/null || echo '<missing>')"
+  debug "systemctl version: $(systemctl --version 2>/dev/null | head -n1 || echo '<unavailable>')"
 
   if ! command -v apache2ctl >/dev/null 2>&1 && ! dpkg -s apache2 >/dev/null 2>&1; then
     err "Apache2 not installed. Please run 'Install/Update Base LAMP Stack' first."
     exit 1
   fi
 
-  if ! systemctl list-unit-files --type=service --all | awk '{print $1}' | grep -qx 'apache2.service'; then
+  if ! systemd_unit_exists apache2.service; then
     err "Apache2 systemd unit not found. Please run 'Install/Update Base LAMP Stack' first."
     exit 1
   fi
 
+  debug "apache2 is-enabled: $(systemctl is-enabled apache2 2>/dev/null || echo '<unknown>')"
+  debug "apache2 is-active: $(systemctl is-active apache2 2>/dev/null || echo '<unknown>')"
   systemctl is-active --quiet apache2 || systemctl start apache2 || true
   # MySQL/MariaDB
   local db_service=""
-  for svc in mysql mariadb mysqld; do
-    if systemctl list-unit-files | awk '{print $1}' | grep -qx "${svc}.service"; then db_service="$svc"; break; fi
-  done
+  db_service=$(find_db_service_unit || true)
   if [[ -z "$db_service" ]]; then
     if command -v mysql >/dev/null 2>&1; then for svc in mysql mariadb mysqld; do systemctl start "$svc" 2>/dev/null && db_service="$svc" && break; done; fi
   fi
+  debug "selected database service: ${db_service:-<none>}"
   if [[ -z "$db_service" ]]; then err "MySQL/MariaDB service not found. Install base stack first."; exit 1; fi
+  debug "${db_service} is-active: $(systemctl is-active "$db_service" 2>/dev/null || echo '<unknown>')"
   systemctl is-active --quiet "$db_service" || systemctl start "$db_service" || true
   install_wp_cli
   apache_global_hardening
