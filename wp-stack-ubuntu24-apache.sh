@@ -237,11 +237,33 @@ ensure_server_alias() {
   if awk -v alias="$alias" 'tolower($1)=="serveralias"{for(i=2;i<=NF;i++) if($i==alias) found=1} END{exit(found?0:1)}' "$conf"; then
     return 0
   fi
+  local tmpconf
+  tmpconf=$(mktemp)
   if grep -Eq '^[[:space:]]*ServerAlias[[:space:]]' "$conf"; then
-    sed -i -E "0,/^[[:space:]]*ServerAlias[[:space:]]/ s|\$| ${alias}|" "$conf"
+    awk -v alias="$alias" '
+      BEGIN { done=0 }
+      {
+        if (!done && tolower($1) == "serveralias") {
+          print $0 " " alias
+          done=1
+          next
+        }
+        print
+      }
+    ' "$conf" > "$tmpconf"
   else
-    sed -i -E "/^[[:space:]]*ServerName[[:space:]]/a\\    ServerAlias ${alias}" "$conf"
+    awk -v alias="$alias" '
+      BEGIN { done=0 }
+      {
+        print
+        if (!done && tolower($1) == "servername") {
+          print "    ServerAlias " alias
+          done=1
+        }
+      }
+    ' "$conf" > "$tmpconf"
   fi
+  mv "$tmpconf" "$conf"
 }
 
 ensure_multisite_server_alias() {
@@ -250,8 +272,17 @@ ensure_multisite_server_alias() {
   if apache_conf_has_wildcard_alias "$conf" "$domain"; then
     return 0
   fi
+  local backup
+  backup=$(mktemp)
+  cp -f "$conf" "$backup"
   ensure_server_alias "$conf" "*.${domain}"
-  apache2ctl configtest
+  if ! apache2ctl configtest; then
+    cp -f "$backup" "$conf"
+    rm -f "$backup"
+    err "Apache configtest failed after updating ${conf}. Original config was restored."
+    return 1
+  fi
+  rm -f "$backup"
   systemctl reload apache2
 }
 
