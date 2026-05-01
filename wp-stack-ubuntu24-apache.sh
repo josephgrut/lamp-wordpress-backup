@@ -21,7 +21,12 @@ DEBUG_MODE="${DEBUG_MODE:-0}"
 log()  { echo -e "[+] $*"; }
 warn() { echo -e "[!] $*"; }
 err()  { echo -e "[x] $*" >&2; }
-debug() { [[ "$DEBUG_MODE" == "1" ]] && echo -e "[debug] $*"; }
+debug() {
+  if [[ "$DEBUG_MODE" == "1" ]]; then
+    echo -e "[debug] $*"
+  fi
+  return 0
+}
 trap 'err "Error on line $LINENO: $BASH_COMMAND"' ERR
 
 random_password() {
